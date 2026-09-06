@@ -433,7 +433,9 @@ fn run_application() -> anyhow::Result<RunOutcome> {
         match command {
             Command::Grab(grab) => run_grab(grab, cli.quiet, cli.no_color, &download, cancel).await,
             Command::Find(find) => run_find(find, cli.quiet, cli.no_color, &download, cancel).await,
-            Command::Serve(serve) => run_serve(serve, &download, cancel).await,
+            Command::Serve(serve) => {
+                run_serve(serve, cli.quiet, cli.no_color, &download, cancel).await
+            }
             Command::GeoUpdate => run_geo_update(&download, cli.quiet, cli.no_color, cancel).await,
             Command::Config(config) => run_config(config, cli.no_config, cli.config.as_deref()),
         }
@@ -683,7 +685,7 @@ async fn validated_stream(
     serve: &ServeArgs,
     protocols: Vec<Protocol>,
     groups: Vec<Vec<Protocol>>,
-) -> anyhow::Result<BoxStream> {
+) -> anyhow::Result<(BoxStream, ValidationProgress)> {
     let config = validator_config(&serve.validator, protocols, groups, false);
     let source: BoxStream = if !serve.validator.files.is_empty() {
         file_source(&serve.validator.files).await?
@@ -691,15 +693,18 @@ async fn validated_stream(
         let fetch_cfg = fetcher_config(&serve.fetcher);
         Box::pin(ProxySource::from_fetcher(fetch_cfg).await?)
     };
-    Ok(Box::pin(ProxyValidator::validate(source, config).await?))
+    let validator = ProxyValidator::validate(source, config).await?;
+    let progress = validator.progress();
+    Ok((Box::pin(validator), progress))
 }
 
 async fn run_serve(
     serve: ServeArgs,
+    quiet: bool,
+    no_color: bool,
     download: &tokio::sync::watch::Receiver<Option<flx::DownloadProgress>>,
     cancel: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<RunOutcome> {
-    let _ = download;
     if serve.fetcher.dry_run || serve.fetcher.list_providers {
         list_sources();
         return Ok(RunOutcome::Finished);
@@ -732,6 +737,21 @@ async fn run_serve(
     };
     let rotator = Arc::new(flx::Rotator::new(options));
     let pool = rotator.pool();
+    let pool_size = serve.pool_size.clamp(1, flx::rotator::MAX_POOL_SIZE);
+    let min_ready = serve.min_ready.clamp(1, flx::rotator::MAX_POOL_SIZE);
+    let endpoint = format!("{}:{}", serve.bind, serve.port);
+    let serve_bar = make_serve_bar(
+        Arc::clone(&pool),
+        min_ready,
+        pool_size,
+        endpoint,
+        quiet,
+        no_color,
+        download,
+    );
+    if let Some(bar) = serve_bar.as_deref() {
+        bar.set_phase("Filling the pool …");
+    }
 
     // Announce live-on-first-proxy before silent refills.
     eprintln!(
@@ -762,12 +782,16 @@ async fn run_serve(
         let bind = serve.bind;
         let port = serve.port;
         let strategy = serve.strategy.clone();
+        let serve_bar = serve_bar.clone();
         tokio::spawn(async move {
             while pool.ready() == 0 {
                 tokio::select! {
                     _ = tokio::time::sleep(SERVE_READY_POLL_INTERVAL) => {}
                     _ = shutdown_rx.changed() => return,
                 }
+            }
+            if let Some(bar) = serve_bar.as_deref() {
+                bar.set_phase("Serving …");
             }
             eprintln!(
                 "flx serve listening on {bind}:{port} (pool: {} proxies, strategy: {strategy})",
@@ -776,7 +800,19 @@ async fn run_serve(
         })
     };
     loop {
-        let mut stream = validated_stream(&serve, protocols.clone(), groups.clone()).await?;
+        if let Some(bar) = serve_bar.as_deref() {
+            if serve.validator.files.is_empty() {
+                bar.set_phase("Fetching proxy lists …");
+            } else {
+                bar.set_phase("Checking online judges …");
+            }
+        }
+        let (mut stream, progress) =
+            validated_stream(&serve, protocols.clone(), groups.clone()).await?;
+        if let Some(bar) = serve_bar.as_deref() {
+            bar.set_progress(progress);
+            bar.set_phase("Checking online judges …");
+        }
         while let Some(proxy) = tokio::select! {
             next = stream.next() => next,
             _ = shutdown_rx.changed() => None,
@@ -784,8 +820,16 @@ async fn run_serve(
             pool.add(proxy);
         }
         rotator.force_ready();
+        if let Some(bar) = serve_bar.as_deref() {
+            if pool.ready() > 0 {
+                bar.set_phase("Serving …");
+            }
+        }
         if static_pool {
             break;
+        }
+        if let Some(bar) = serve_bar.as_deref() {
+            bar.set_phase("Waiting for refresh …");
         }
         let refresh = std::time::Duration::from_secs(
             serve
