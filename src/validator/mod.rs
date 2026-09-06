@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     task::{Context as TaskContext, Poll},
@@ -20,7 +20,10 @@ use anyhow::Context as _;
 use futures_util::{Stream, StreamExt};
 #[cfg(feature = "log")]
 use tokio::time::Instant;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, Notify},
+    task::JoinHandle,
+};
 
 pub use config::{
     Config, DEFAULT_CONCURRENCY_LIMIT, DEFAULT_HTTPS_JUDGE_URLS, DEFAULT_HTTP_JUDGE_URLS,
@@ -44,6 +47,47 @@ fn validator_channel_capacity(concurrency_limit: usize) -> usize {
     concurrency_limit
         .saturating_mul(4)
         .clamp(VALIDATOR_CHANNEL_MIN, VALIDATOR_CHANNEL_MAX)
+}
+
+/// Cooperative pause gate for validation workers.
+///
+/// Workers check [`PauseGate::wait_if_paused`] before starting each new
+/// probe; in-flight probes always run to completion. Clone the shared
+/// handle to drive pause state from elsewhere (e.g. a signal handler).
+#[derive(Debug, Default)]
+pub struct PauseGate {
+    paused: AtomicBool,
+    notify: Notify,
+}
+
+impl PauseGate {
+    /// Creates an unpaused gate.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Holds new probes; in-flight probes finish normally.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// Lets held probes start again.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    /// Whether new probes are currently held.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Waits while paused; returns immediately when running.
+    pub async fn wait_if_paused(&self) {
+        while self.is_paused() {
+            self.notify.notified().await;
+        }
+    }
 }
 
 struct BufferedProxyStream {
@@ -73,6 +117,7 @@ pub struct ProxyValidator {
     receiver: mpsc::Receiver<Proxy>,
     progress: ValidationProgress,
     judge_health: JudgeHealthReport,
+    pause_gate: Arc<PauseGate>,
     #[cfg(feature = "log")]
     timer: Instant,
     task_handle: JoinHandle<()>,
@@ -247,6 +292,8 @@ impl ProxyValidator {
             (None, None)
         };
         let progress = ValidationProgress::default();
+        let pause_gate = Arc::new(PauseGate::new());
+        let manager_pause = Arc::clone(&pause_gate);
         let manager_total = Arc::clone(&progress.total);
         let manager_done = Arc::clone(&progress.done);
         let manager_passed = Arc::clone(&progress.passed);
@@ -572,8 +619,10 @@ impl ProxyValidator {
 
             let worker_group_tx = group_tx.clone();
             let worker_failures = failure_tx.clone();
+            let worker_pause = Arc::clone(&manager_pause);
             jobs.for_each_concurrent(concurrency_limit, move |job| {
                 let sender = sender.clone();
+                let pause = worker_pause.clone();
                 let counters = worker_counters.clone();
                 let targets = targets.clone();
                 let group_tx = worker_group_tx.clone();
@@ -588,6 +637,9 @@ impl ProxyValidator {
                     retry_delay: config.retry_delay,
                 };
                 async move {
+                    // Hold new probes while paused; in-flight probes already
+                    // past this gate run to completion.
+                    pause.wait_if_paused().await;
                     match job {
                         Job::Singleton {
                             proxy,
@@ -654,6 +706,7 @@ impl ProxyValidator {
             receiver,
             progress,
             judge_health,
+            pause_gate,
             #[cfg(feature = "log")]
             timer: Instant::now(),
             task_handle: manager,
@@ -669,6 +722,26 @@ impl ProxyValidator {
 
     pub fn progress(&self) -> ValidationProgress {
         self.progress.clone()
+    }
+
+    /// Pauses starting new probes; in-flight probes finish normally.
+    pub fn pause(&self) {
+        self.pause_gate.pause();
+    }
+
+    /// Resumes starting new probes after [`ProxyValidator::pause`].
+    pub fn resume(&self) {
+        self.pause_gate.resume();
+    }
+
+    /// Whether new probes are currently held.
+    pub fn is_paused(&self) -> bool {
+        self.pause_gate.is_paused()
+    }
+
+    /// Shares the pause gate (e.g. with a signal handler task).
+    pub fn pause_gate(&self) -> Arc<PauseGate> {
+        Arc::clone(&self.pause_gate)
     }
 
     /// Take failure receiver for machine-readable probe reports.
@@ -922,6 +995,46 @@ mod tests {
         assert_eq!(progress.passed(), 0);
         assert_eq!(progress.remaining(), 0);
         assert!((progress.fraction() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn pause_holds_new_probes_until_resume() {
+        // Feed candidates through a channel so pause applies before any probe.
+        let judge = spawn_echo_judge().await;
+        let config = Config {
+            types: vec![Protocol::Http(Anonymity::Unknown)],
+            http_judge_urls: vec![judge],
+            https_judge_urls: vec![],
+            ..Config::default()
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel::<Proxy>(8);
+        let source = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|proxy| (proxy, rx))
+        });
+        let mut validator = ProxyValidator::validate(source, config).await.unwrap();
+        let progress = validator.progress();
+        let gate = validator.pause_gate();
+        gate.pause();
+        assert!(validator.is_paused());
+
+        for port in 1u16..=5 {
+            tx.send(Proxy::with_expected_types(
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+                std::sync::Arc::from([Protocol::Http(Anonymity::Unknown)]),
+            ))
+            .await
+            .unwrap();
+        }
+        // Held jobs must not probe while paused (closed ports fail fast offline).
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(progress.done(), 0);
+
+        gate.resume();
+        assert!(!validator.is_paused());
+        drop(tx);
+        while validator.get_one().await.is_some() {}
+        assert_eq!(progress.done(), 5);
     }
 
     #[tokio::test]
