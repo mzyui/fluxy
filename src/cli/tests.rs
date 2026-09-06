@@ -2010,3 +2010,23 @@ fn validation_summary_puts_distribution_on_its_own_indented_line() {
 fn run_stats_summary_is_none_for_an_empty_run() {
     assert!(run_with_stats(&[]).is_none());
 }
+
+#[test]
+fn serve_pauses_only_when_pool_reaches_its_cap() {
+    assert!(!serve_should_pause(0, 25));
+    assert!(!serve_should_pause(24, 25));
+    assert!(serve_should_pause(25, 25));
+    assert!(serve_should_pause(30, 25));
+    assert!(
+        !serve_should_pause(0, 0),
+        "zero cap still pauses only at >= 1"
+    );
+    assert!(serve_should_pause(1, 0));
+}
+
+#[test]
+fn proxy_count_singularizes_one_proxy() {
+    assert_eq!(proxy_count(0), "0 proxies");
+    assert_eq!(proxy_count(1), "1 proxy");
+    assert_eq!(proxy_count(25), "25 proxies");
+}
