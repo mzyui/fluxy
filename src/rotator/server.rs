@@ -11,7 +11,7 @@ use tokio::{
     time,
 };
 
-use super::{ServeOptions, REQUEST_HEAD_TIMEOUT};
+use super::{ServeEvent, ServeOptions, REQUEST_HEAD_TIMEOUT};
 use crate::{
     negotiators::{HttpsNegotiator, NegotiatorTrait, Socks4Negotiator, Socks5Negotiator},
     rotator::RotatorPool,
@@ -63,8 +63,10 @@ async fn handle_connection(
     options: Arc<ServeOptions>,
 ) {
     let _ = client.set_nodelay(true);
+    let peer = client.peer_addr().ok();
+    let started = Instant::now();
     // Share one deadline across head, connect, handshake, and relay.
-    let deadline = Instant::now() + options.request_timeout;
+    let deadline = started + options.request_timeout;
     let expected_auth = options.auth.as_ref().map(|(user, pass)| {
         let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
         format!("Basic {encoded}").as_bytes().to_vec()
@@ -79,19 +81,65 @@ async fn handle_connection(
         Ok(Ok(request)) => request,
         Ok(Err(_)) | Err(_) => {
             let _ = client.write_all(RESPONSE_BAD_REQUEST).await;
+            emit(
+                &options,
+                ServeEvent::Completed {
+                    client: peer,
+                    method: "-".to_owned(),
+                    target: "-".to_owned(),
+                    upstream: None,
+                    ok: false,
+                    reason: Some("bad request".to_owned()),
+                    elapsed: started.elapsed(),
+                },
+            );
             return;
         }
     };
+    let target = format!("{}:{}", request.host, request.port);
+    emit(
+        &options,
+        ServeEvent::Incoming {
+            client: peer,
+            method: request.method.clone(),
+            target: target.clone(),
+        },
+    );
 
     if !request.authorized {
         let _ = client.write_all(RESPONSE_UNAUTHORIZED).await;
+        emit(
+            &options,
+            ServeEvent::Completed {
+                client: peer,
+                method: request.method.clone(),
+                target,
+                upstream: None,
+                ok: false,
+                reason: Some("auth required".to_owned()),
+                elapsed: started.elapsed(),
+            },
+        );
         return;
     }
 
     let Some(proxy) = pool.pick() else {
         let _ = client.write_all(RESPONSE_NO_PROXY).await;
+        emit(
+            &options,
+            ServeEvent::Completed {
+                client: peer,
+                method: request.method.clone(),
+                target,
+                upstream: None,
+                ok: false,
+                reason: Some("no proxy".to_owned()),
+                elapsed: started.elapsed(),
+            },
+        );
         return;
     };
+    let via = proxy.as_text().to_owned();
 
     match open_upstream(&proxy, &request, deadline).await {
         Ok(mut upstream) => {
@@ -116,26 +164,58 @@ async fn handle_connection(
             } else {
                 pool.report_failure(&proxy);
             }
+            emit(
+                &options,
+                ServeEvent::Completed {
+                    client: peer,
+                    method: request.method.clone(),
+                    target,
+                    upstream: Some(via),
+                    ok: relayed,
+                    reason: (!relayed).then(|| "relay failed".to_owned()),
+                    elapsed: started.elapsed(),
+                },
+            );
         }
         Err(_error) => {
             pool.report_failure(&proxy);
-            let response = if request.tunnel {
-                RESPONSE_BAD_GATEWAY
+            let (response, reason) = if request.tunnel {
+                (RESPONSE_BAD_GATEWAY, "bad gateway")
             } else {
-                RESPONSE_NO_PROXY
+                (RESPONSE_NO_PROXY, "no proxy")
             };
             let _ = client.write_all(response).await;
+            emit(
+                &options,
+                ServeEvent::Completed {
+                    client: peer,
+                    method: request.method.clone(),
+                    target,
+                    upstream: Some(via),
+                    ok: false,
+                    reason: Some(reason.to_owned()),
+                    elapsed: started.elapsed(),
+                },
+            );
         }
     }
 }
 
 struct ClientRequest {
     tunnel: bool,
+    method: String,
     host: String,
     port: u16,
     authorized: bool,
     /// Forward full requests or CONNECT tails upstream.
     forward: Vec<u8>,
+}
+
+/// Report connection events without ever blocking the relay.
+fn emit(options: &ServeOptions, event: super::ServeEvent) {
+    if let Some(tx) = options.event_tx.as_ref() {
+        let _ = tx.try_send(event);
+    }
 }
 
 async fn read_request(
@@ -164,7 +244,10 @@ async fn read_request(
         Status::Complete(consumed) => consumed,
         Status::Partial => anyhow::bail!("incomplete request head"),
     };
-    let method = request.method.context("request without a method")?;
+    let method: String = request
+        .method
+        .context("request without a method")?
+        .to_owned();
     let path = request.path.context("request without a path")?;
     let authorized = match expected_auth {
         None => true,
@@ -193,6 +276,7 @@ async fn read_request(
     }
     Ok(ClientRequest {
         tunnel,
+        method,
         host,
         port,
         authorized,
