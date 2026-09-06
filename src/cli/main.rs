@@ -8,7 +8,7 @@ use clap::{CommandFactory, FromArgMatches};
 use flx::initialize_logging;
 use flx::{
     proxy::models::{Anonymity, Protocol, Proxy},
-    FetchStage, IpType, ProxySource, ProxyValidator, ValidationProgress,
+    FetchStage, IpType, PauseGate, ProxySource, ProxyValidator, ValidationProgress,
 };
 use futures_util::{Stream, StreamExt};
 use std::io::Write as _;
@@ -685,7 +685,7 @@ async fn validated_stream(
     serve: &ServeArgs,
     protocols: Vec<Protocol>,
     groups: Vec<Vec<Protocol>>,
-) -> anyhow::Result<(BoxStream, ValidationProgress)> {
+) -> anyhow::Result<(BoxStream, ValidationProgress, Arc<PauseGate>)> {
     let config = validator_config(&serve.validator, protocols, groups, false);
     let source: BoxStream = if !serve.validator.files.is_empty() {
         file_source(&serve.validator.files).await?
@@ -695,7 +695,34 @@ async fn validated_stream(
     };
     let validator = ProxyValidator::validate(source, config).await?;
     let progress = validator.progress();
-    Ok((Box::pin(validator), progress))
+    let gate = validator.pause_gate();
+    Ok((Box::pin(validator), progress, gate))
+}
+
+// Pause validating while the serve pool is full; resume when room frees.
+fn serve_should_pause(pool_len: usize, pool_size: usize) -> bool {
+    pool_len >= pool_size.max(1)
+}
+
+// Render proxy counts with correct singular/plural.
+fn proxy_count(count: usize) -> String {
+    if count == 1 {
+        "1 proxy".to_owned()
+    } else {
+        format!("{count} proxies")
+    }
+}
+
+// Print a serve log line without colliding with the status line.
+fn announce(bar: Option<&impl OutputGuard>, message: &str) {
+    match bar {
+        Some(bar) => {
+            bar.before_write();
+            eprintln!("{message}");
+            bar.after_write();
+        }
+        None => eprintln!("{message}"),
+    }
 }
 
 async fn run_serve(
@@ -715,6 +742,7 @@ async fn run_serve(
         protocols.push(Protocol::Http(Anonymity::Unknown));
     }
 
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(flx::rotator::EVENT_CHANNEL_CAPACITY);
     let options = flx::ServeOptions {
         bind: serve.bind,
         port: serve.port,
@@ -734,6 +762,7 @@ async fn run_serve(
             .as_deref()
             .map(parse_serve_credentials)
             .transpose()?,
+        event_tx: Some(event_tx),
     };
     let rotator = Arc::new(flx::Rotator::new(options));
     let pool = rotator.pool();
@@ -752,11 +781,23 @@ async fn run_serve(
     if let Some(bar) = serve_bar.as_deref() {
         bar.set_phase("Filling the pool …");
     }
+    // Print connection events without colliding with the status line.
+    let _event_printer = {
+        let bar = serve_bar.clone();
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                announce(bar.as_deref(), &event.to_string());
+            }
+        })
+    };
 
     // Announce live-on-first-proxy before silent refills.
-    eprintln!(
-        "flx serve filling the pool on {}:{} — goes live on the first validated proxy",
-        serve.bind, serve.port
+    announce(
+        serve_bar.as_deref(),
+        &format!(
+            "flx serve filling the pool on {}:{} — goes live on the first validated proxy",
+            serve.bind, serve.port
+        ),
     );
 
     // Fan cancel notifications out to every serve task.
@@ -793,12 +834,17 @@ async fn run_serve(
             if let Some(bar) = serve_bar.as_deref() {
                 bar.set_phase("Serving …");
             }
-            eprintln!(
-                "flx serve listening on {bind}:{port} (pool: {} proxies, strategy: {strategy})",
-                pool.ready()
+            announce(
+                serve_bar.as_deref(),
+                &format!(
+                    "flx serve listening on {bind}:{port} (pool: {}, strategy: {strategy})",
+                    proxy_count(pool.ready())
+                ),
             );
         })
     };
+    // Recheck pool room on a fixed cadence while the feed is paused.
+    let mut room_tick = tokio::time::interval(SERVE_READY_POLL_INTERVAL);
     loop {
         if let Some(bar) = serve_bar.as_deref() {
             if serve.validator.files.is_empty() {
@@ -807,18 +853,55 @@ async fn run_serve(
                 bar.set_phase("Checking online judges …");
             }
         }
-        let (mut stream, progress) =
+        let (mut stream, progress, gate) =
             validated_stream(&serve, protocols.clone(), groups.clone()).await?;
         if let Some(bar) = serve_bar.as_deref() {
             bar.set_progress(progress);
             bar.set_phase("Checking online judges …");
         }
-        while let Some(proxy) = tokio::select! {
-            next = stream.next() => next,
-            _ = shutdown_rx.changed() => None,
-        } {
-            pool.add(proxy);
+        // Hold validating while the pool is full; evictions free room again.
+        let mut paused_full = false;
+        if serve_should_pause(pool.len(), pool_size) {
+            if static_pool {
+                // A full static pool needs no further candidates.
+                drop(stream);
+                rotator.force_ready();
+                break;
+            }
+            gate.pause();
+            paused_full = true;
+            if let Some(bar) = serve_bar.as_deref() {
+                bar.set_phase("Pool full — validating paused …");
+            }
         }
+        loop {
+            tokio::select! {
+                next = stream.next() => {
+                    let Some(proxy) = next else { break };
+                    pool.add(proxy);
+                }
+                _ = shutdown_rx.changed() => break,
+                _ = room_tick.tick() => {}
+            }
+            let full = serve_should_pause(pool.len(), pool_size);
+            if full && static_pool {
+                break;
+            }
+            if full && !paused_full {
+                gate.pause();
+                paused_full = true;
+                if let Some(bar) = serve_bar.as_deref() {
+                    bar.set_phase("Pool full — validating paused …");
+                }
+            } else if !full && paused_full {
+                gate.resume();
+                paused_full = false;
+                if let Some(bar) = serve_bar.as_deref() {
+                    bar.set_phase("Checking online judges …");
+                }
+            }
+        }
+        drop(stream);
         rotator.force_ready();
         if let Some(bar) = serve_bar.as_deref() {
             if pool.ready() > 0 {
@@ -866,6 +949,45 @@ async fn run_find(
     // Record pass-1 candidates for fallback without re-fetching.
     let recordings: Arc<std::sync::Mutex<Vec<Proxy>>> = Arc::default();
     let recorded_types: Arc<[Protocol]> = Arc::from(protocols.clone());
+    // Toggle validation pause via SIGUSR1 (Unix only) across both passes.
+    #[cfg(unix)]
+    let pause_holder: Arc<std::sync::Mutex<Option<Arc<PauseGate>>>> = Arc::default();
+    #[cfg(unix)]
+    let _pause_watcher = {
+        let holder = Arc::clone(&pause_holder);
+        let cancel_watcher = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            let mut signals =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                {
+                    Ok(signals) => signals,
+                    Err(_) => return,
+                };
+            loop {
+                tokio::select! {
+                    _ = signals.recv() => {
+                        let gate = holder.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        match gate {
+                            Some(gate) if gate.is_paused() => {
+                                gate.resume();
+                                eprintln!("flx find resumed — validating new probes");
+                            }
+                            Some(gate) => {
+                                gate.pause();
+                                eprintln!(
+                                    "flx find paused — in-flight probes finish, new probes held"
+                                );
+                            }
+                            None => {
+                                eprintln!("flx find pause signal arrived with no active pass");
+                            }
+                        }
+                    }
+                    _ = cancel_watcher.notified() => break,
+                }
+            }
+        })
+    };
     let warmup = make_warmup(quiet, no_color, download, false, None);
     let config = validator_config(&find.validator, protocols.clone(), groups.clone(), false);
 
@@ -935,6 +1057,11 @@ async fn run_find(
         drop(warmup);
         pass
     };
+    #[cfg(unix)]
+    pause_holder
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .replace(pass1.pause_gate());
     let mut failure_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if let Some(path) = find.validator.report_failures.clone() {
         if let Some(rx) = pass1.take_failures() {
@@ -980,6 +1107,11 @@ async fn run_find(
     )
     .await;
     drop(guard1);
+    #[cfg(unix)]
+    pause_holder
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     if !matches!(outcome1, Ok(RunOutcome::Finished)) {
         if matches!(outcome1, Ok(RunOutcome::Cancelled)) {
             report_validation_summary(
@@ -1033,6 +1165,11 @@ async fn run_find(
                 return Ok(RunOutcome::Cancelled);
             }
         };
+        #[cfg(unix)]
+        pause_holder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(pass2.pause_gate());
         if let Some(path) = find.validator.report_failures.clone() {
             if let Some(rx) = pass2.take_failures() {
                 failure_tasks.push(tokio::spawn(async move {
@@ -1059,6 +1196,11 @@ async fn run_find(
         )
         .await;
         drop(guard2);
+        #[cfg(unix)]
+        pause_holder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         let summary2 = || {
             ValidationStats::from_progress(&progress1, started.elapsed()).merged(
                 &ValidationStats::from_progress(&progress2, started.elapsed()),
