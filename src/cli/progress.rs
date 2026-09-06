@@ -11,7 +11,7 @@ use std::{
 
 use crate::status_line::{Options as StatusLineOptions, StatusLine};
 use crate::style::Colorize;
-use flx::{DownloadProgress, ValidationProgress};
+use flx::{DownloadProgress, RotatorPool, ValidationProgress};
 use tokio::sync::watch;
 
 use crate::OutputGuard;
@@ -392,13 +392,169 @@ impl OutputGuard for WarmupBar {
     }
 }
 
+const SERVE_ICON: &str = "●";
+
+/// Render the persistent serve status: pool fill plus validation counters.
+pub struct ServeBar {
+    _status: StatusLine<ServeFrame>,
+    phase: Arc<Mutex<&'static str>>,
+    progress: Arc<Mutex<Option<ValidationProgress>>>,
+    _cursor: CursorHider,
+}
+
+struct ServeFrame {
+    phase: Arc<Mutex<&'static str>>,
+    progress: Arc<Mutex<Option<ValidationProgress>>>,
+    pool: Arc<RotatorPool>,
+    min_ready: usize,
+    pool_size: usize,
+    endpoint: String,
+    download: watch::Receiver<Option<DownloadProgress>>,
+    started: Instant,
+    color: bool,
+}
+
+impl Display for ServeFrame {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(dl) = self.download.borrow().as_ref() {
+            let detail = if dl.total > 0 {
+                let pct = (dl.downloaded as f64 / dl.total as f64) * 100.0;
+                format!("{ELLIPSIS_TAIL} {pct:.2}%")
+            } else {
+                let mb = dl.downloaded as f64 / (1024.0 * 1024.0);
+                format!("{ELLIPSIS_TAIL} {mb:.1} MB")
+            };
+            let line = if self.color {
+                format!("{} {}{}", DOWNLOAD_ICON.cyan(), dl.name, detail.dimmed())
+            } else {
+                format!("{DOWNLOAD_ICON} {}{detail}", dl.name)
+            };
+            return f.write_str(&fit_terminal(line, self.color, terminal_width()));
+        }
+        let ready = self.pool.ready();
+        let stored = self.pool.len();
+        let live = ready >= self.min_ready.max(1);
+        let icon = if live { SERVE_ICON } else { PHASE_ICON };
+        let phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        let pool_part = if live {
+            format!("pool {ready}/{}", self.pool_size)
+        } else {
+            format!("pool {ready}/{} ready", self.min_ready)
+        };
+        let stored_part = if stored != ready {
+            format!(" (stored {stored})")
+        } else {
+            String::new()
+        };
+        let line = match self
+            .progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            Some(progress) => {
+                let done = progress.done();
+                let total = progress.total();
+                let passed = progress.passed();
+                let failed = done.saturating_sub(passed);
+                let elapsed = self.started.elapsed().as_secs_f64();
+                let rate = if elapsed > 0.0 {
+                    done as f64 / elapsed
+                } else {
+                    0.0
+                };
+                if self.color {
+                    format!(
+                        "{} {} · {} · {pool_part}{stored_part} · Validating {done}/{total} · {} · {} ({rate:.0}/s)",
+                        icon.cyan(),
+                        phase.bold(),
+                        self.endpoint.as_str().dimmed(),
+                        format!("{passed} valid").green(),
+                        format!("{failed} fail").red(),
+                    )
+                } else {
+                    format!(
+                        "{icon} {phase} · {} · {pool_part}{stored_part} · Validating {done}/{total} · {passed} valid · {failed} fail ({rate:.0}/s)",
+                        self.endpoint
+                    )
+                }
+            }
+            None => {
+                if self.color {
+                    format!(
+                        "{} {} · {} · {pool_part}{stored_part}",
+                        icon.cyan(),
+                        phase.bold(),
+                        self.endpoint.as_str().dimmed(),
+                    )
+                } else {
+                    format!(
+                        "{icon} {phase} · {} · {pool_part}{stored_part}",
+                        self.endpoint
+                    )
+                }
+            }
+        };
+        f.write_str(&fit_terminal(line, self.color, terminal_width()))
+    }
+}
+
+impl ServeBar {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pool: Arc<RotatorPool>,
+        min_ready: usize,
+        pool_size: usize,
+        endpoint: String,
+        quiet: bool,
+        no_color: bool,
+        download: watch::Receiver<Option<DownloadProgress>>,
+    ) -> Option<Self> {
+        use std::io::IsTerminal as _;
+
+        // Serve writes no stdout payload, so only stderr TTY and quiet matter.
+        if quiet || !std::io::stderr().is_terminal() {
+            return None;
+        }
+        let _cursor = CursorHider::acquire();
+        let phase = Arc::new(Mutex::new("Filling the pool …"));
+        let progress = Arc::new(Mutex::new(None));
+        let frame = ServeFrame {
+            phase: Arc::clone(&phase),
+            progress: Arc::clone(&progress),
+            pool,
+            min_ready,
+            pool_size,
+            endpoint,
+            download,
+            started: Instant::now(),
+            color: use_color(no_color),
+        };
+        let status = StatusLine::with_options(frame, StatusLineOptions::default());
+        Some(Self {
+            _status: status,
+            phase,
+            progress,
+            _cursor,
+        })
+    }
+
+    pub fn set_phase(&self, phase: &'static str) {
+        *self.phase.lock().unwrap_or_else(|e| e.into_inner()) = phase;
+    }
+
+    pub fn set_progress(&self, progress: ValidationProgress) {
+        *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(progress);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         cursor_escape, fit_terminal, show_progress, use_color, visible_len, CursorHider, Frame,
-        WarmupFrame, HIDE_CURSOR, LIVE_CURSOR_HIDERS, SHOW_CURSOR,
+        ServeFrame, WarmupFrame, HIDE_CURSOR, LIVE_CURSOR_HIDERS, SHOW_CURSOR,
     };
-    use flx::{DownloadProgress, ValidationProgress};
+    use flx::{DownloadProgress, RotatorPool, Strategy, ValidationProgress};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, MutexGuard};
     use std::time::{Duration, Instant};
@@ -464,6 +620,32 @@ mod tests {
             started: Instant::now() - Duration::from_secs(4),
             color,
         }
+    }
+
+    fn serve_frame(
+        pool: Arc<RotatorPool>,
+        phase: &'static str,
+        progress: Option<ValidationProgress>,
+        download: watch::Receiver<Option<DownloadProgress>>,
+        color: bool,
+    ) -> ServeFrame {
+        ServeFrame {
+            phase: Arc::new(Mutex::new(phase)),
+            progress: Arc::new(Mutex::new(progress)),
+            pool,
+            min_ready: 1,
+            pool_size: 25,
+            endpoint: "127.0.0.1:8080".to_owned(),
+            download,
+            started: Instant::now() - Duration::from_secs(4),
+            color,
+        }
+    }
+
+    fn serve_pool() -> Arc<RotatorPool> {
+        let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
+        assert!(pool.add(flx::Proxy::new(std::net::Ipv4Addr::LOCALHOST, 8081)));
+        pool
     }
 
     #[test]
@@ -639,5 +821,74 @@ mod tests {
             ),
             "a very long line that should remain"
         );
+    }
+
+    #[test]
+    fn serve_frame_shows_filling_pool_with_validation_counters() {
+        let (_, download) = watch::channel(None);
+        let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
+        let frame = serve_frame(
+            pool,
+            "Filling the pool …",
+            Some(ValidationProgress::default()),
+            download,
+            false,
+        );
+        let rendered = frame.to_string();
+        assert!(rendered.starts_with("⟳"), "{rendered}");
+        assert!(rendered.contains("Filling the pool"), "{rendered}");
+        assert!(rendered.contains("pool 0/1 ready"), "{rendered}");
+        assert!(rendered.contains("Validating 0/0"), "{rendered}");
+        assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
+    }
+
+    #[test]
+    fn serve_frame_switches_to_serving_icon_when_ready() {
+        let (_, download) = watch::channel(None);
+        let frame = serve_frame(
+            serve_pool(),
+            "Serving …",
+            Some(ValidationProgress::default()),
+            download,
+            false,
+        );
+        let rendered = frame.to_string();
+        assert!(rendered.starts_with("●"), "{rendered}");
+        assert!(rendered.contains("pool 1/25"), "{rendered}");
+    }
+
+    #[test]
+    fn serve_frame_download_line_wins_over_pool() {
+        let (tx, download) = watch::channel(None);
+        tx.send_replace(Some(DownloadProgress {
+            name: "GeoLite2-City.mmdb",
+            downloaded: 400,
+            total: 1000,
+        }));
+        let frame = serve_frame(
+            serve_pool(),
+            "Serving …",
+            Some(ValidationProgress::default()),
+            download,
+            false,
+        );
+        let rendered = frame.to_string();
+        assert!(rendered.contains("GeoLite2-City.mmdb"), "{rendered}");
+        assert!(!rendered.contains("pool"), "{rendered}");
+    }
+
+    #[test]
+    fn serve_frame_uses_ansi_codes_only_when_colored() {
+        let _guard = lock_color();
+        crate::style::set_override(false);
+        let (_, download) = watch::channel(None);
+        let plain = serve_frame(serve_pool(), "Serving …", None, download, false).to_string();
+        let (_, download) = watch::channel(None);
+        crate::style::set_override(true);
+        let colored = serve_frame(serve_pool(), "Serving …", None, download, true).to_string();
+        crate::style::set_override(false);
+
+        assert!(!plain.contains('\x1b'), "{plain}");
+        assert!(colored.contains('\x1b'), "{colored}");
     }
 }
