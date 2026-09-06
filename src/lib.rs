@@ -59,20 +59,20 @@ pub use providers::all_providers;
 pub use providers::models::{ProviderTier, ScrapeMode, Source};
 pub use providers::ProxyProvider;
 pub use proxy::models::{Anonymity, Protocol, Proxy, ProxyType, RuntimeStats};
-pub use rotator::{Rotator, RotatorPool, ServeOptions, Strategy};
+pub use rotator::{Rotator, RotatorPool, ServeEvent, ServeOptions, Strategy};
 pub use validator::{
-    Config as ValidatorConfig, JudgeHealthReport, ProxyFailure, ProxyValidator, ValidationProgress,
-    ValidationStatus,
+    Config as ValidatorConfig, JudgeHealthReport, PauseGate, ProxyFailure, ProxyValidator,
+    ValidationProgress, ValidationStatus,
 };
 
 /// Re-exports common types.
 pub mod prelude {
     pub use crate::{
         all_providers, load_proxy_files, sync_database, Anonymity, FetcherConfig, Flx, FlxError,
-        GeoData, GeoLookup, IpType, JudgeHealthReport, Protocol, Proxy, ProxyFailure, ProxyFetcher,
-        ProxyParseError, ProxySource, ProxyStreamExt, ProxyType, ProxyValidator, RuntimeStats,
-        ScrapeMode, SortKey, SortOrder, Source, SyncOutcome, ValidationProgress, ValidationRun,
-        ValidatorConfig,
+        GeoData, GeoLookup, IpType, JudgeHealthReport, PauseGate, Protocol, Proxy, ProxyFailure,
+        ProxyFetcher, ProxyParseError, ProxySource, ProxyStreamExt, ProxyType, ProxyValidator,
+        RuntimeStats, ScrapeMode, SortKey, SortOrder, Source, SyncOutcome, ValidationProgress,
+        ValidationRun, ValidatorConfig,
     };
 }
 
