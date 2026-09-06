@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use crate::{
     error::FlxError,
     proxy::models::{Anonymity, Protocol, Proxy},
-    FetcherConfig, ProxySource, ProxyValidator, ValidationProgress, ValidatorConfig,
+    FetcherConfig, PauseGate, ProxySource, ProxyValidator, ValidationProgress, ValidatorConfig,
 };
 
 /// Marks stdin as a proxy source.
@@ -368,9 +368,9 @@ impl Flx {
             }
         };
 
-        let (mut output, progress, failures) =
+        let (mut output, progress, failures, pause_gate) =
             if validator_config.types.is_empty() && validator_config.groups.is_empty() {
-                (source, ValidationProgress::default(), None)
+                (source, ValidationProgress::default(), None, None)
             } else {
                 let mut validator = ProxyValidator::validate(source, validator_config)
                     .await
@@ -378,7 +378,13 @@ impl Flx {
                 let progress = validator.progress();
                 // Takes failures before boxing; undrained receivers drop buffered items.
                 let failures = validator.take_failures();
-                (Box::pin(validator) as BoxStream, progress, failures)
+                let pause_gate = validator.pause_gate();
+                (
+                    Box::pin(validator) as BoxStream,
+                    progress,
+                    failures,
+                    Some(pause_gate),
+                )
             };
 
         if limit > 0 {
@@ -389,6 +395,7 @@ impl Flx {
             stream: output,
             progress,
             failures,
+            pause_gate,
         })
     }
 
@@ -448,6 +455,7 @@ pub struct ValidationRun {
     stream: BoxStream,
     progress: ValidationProgress,
     failures: Option<mpsc::Receiver<crate::ProxyFailure>>,
+    pause_gate: Option<Arc<PauseGate>>,
 }
 
 impl ValidationRun {
@@ -458,6 +466,29 @@ impl ValidationRun {
     /// Takes the failure feed when reporting is enabled.
     pub fn take_failures(&mut self) -> Option<mpsc::Receiver<crate::ProxyFailure>> {
         self.failures.take()
+    }
+
+    /// Pauses starting new probes; in-flight probes finish normally.
+    ///
+    /// No-op when validation was skipped with [`Flx::no_validate`].
+    pub fn pause(&self) {
+        if let Some(gate) = &self.pause_gate {
+            gate.pause();
+        }
+    }
+
+    /// Resumes starting new probes after [`ValidationRun::pause`].
+    pub fn resume(&self) {
+        if let Some(gate) = &self.pause_gate {
+            gate.resume();
+        }
+    }
+
+    /// Whether new probes are currently held.
+    pub fn is_paused(&self) -> bool {
+        self.pause_gate
+            .as_ref()
+            .is_some_and(|gate| gate.is_paused())
     }
 }
 
@@ -837,6 +868,33 @@ mod tests {
         assert_eq!(progress.done(), 0);
         assert_eq!(progress.passed(), 0);
         assert!(run.take_failures().is_none());
+    }
+
+    #[tokio::test]
+    async fn run_without_validation_ignores_pause() {
+        let path = std::env::temp_dir().join(format!(
+            "flx_lib_test_nopause_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "192.0.2.1:8080\n").unwrap();
+
+        let run = Flx::from_file(&path)
+            .unwrap()
+            .no_validate()
+            .stream_with_progress()
+            .await
+            .unwrap();
+
+        assert!(!run.is_paused());
+        run.pause();
+        assert!(!run.is_paused(), "runs without validation carry no gate");
+        run.resume();
+        assert!(!run.is_paused());
+        let _ = std::fs::remove_file(&path);
     }
     #[test]
     fn from_file_nonexistent_yields_io_error() {
