@@ -2,7 +2,7 @@
 use std::io::IsTerminal as _;
 use std::sync::Arc;
 
-use flx::{DownloadProgress, ValidationProgress};
+use flx::{DownloadProgress, RotatorPool, ValidationProgress};
 use tokio::sync::watch;
 
 #[cfg(feature = "progress_bar")]
@@ -113,7 +113,44 @@ pub struct WarmupBar;
 impl WarmupBar {
     pub fn set_phase(&self, _phase: &'static str) {}
 
+    pub fn set_progress(&self, _progress: ValidationProgress) {}
+
     pub fn refresh(&self) {}
+}
+
+#[cfg(feature = "progress_bar")]
+pub fn make_serve_bar(
+    pool: Arc<RotatorPool>,
+    min_ready: usize,
+    pool_size: usize,
+    endpoint: String,
+    quiet: bool,
+    no_color: bool,
+    download: &watch::Receiver<Option<DownloadProgress>>,
+) -> Option<Arc<progress::ServeBar>> {
+    progress::ServeBar::new(
+        pool,
+        min_ready,
+        pool_size,
+        endpoint,
+        quiet,
+        no_color,
+        download.clone(),
+    )
+    .map(Arc::new)
+}
+
+#[cfg(not(feature = "progress_bar"))]
+pub fn make_serve_bar(
+    _pool: Arc<RotatorPool>,
+    _min_ready: usize,
+    _pool_size: usize,
+    _endpoint: String,
+    _quiet: bool,
+    _no_color: bool,
+    _download: &watch::Receiver<Option<DownloadProgress>>,
+) -> Option<Arc<WarmupBar>> {
+    None
 }
 
 #[cfg(not(feature = "progress_bar"))]
