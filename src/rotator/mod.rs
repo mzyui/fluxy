@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::mpsc;
 use tokio::{net::TcpListener, time};
 
 pub use pool::RotatorPool;
@@ -20,6 +21,8 @@ pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_PORT: u16 = 8080;
 /// Cap pooled proxies; feeder refills up to it.
 pub const MAX_POOL_SIZE: usize = 25;
+/// Bound queued serve events; excess events drop instead of blocking relays.
+pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 pub const DEFAULT_POOL_SIZE: usize = MAX_POOL_SIZE;
 /// Gate serving until this many proxies are ready.
 pub const DEFAULT_MIN_READY: usize = 1;
@@ -67,6 +70,8 @@ pub struct ServeOptions {
     /// Require Basic proxy auth from clients.
     pub auth: Option<(String, String)>,
     pub request_timeout: Duration,
+    /// Opt-in sink for per-connection events; `None` disables reporting.
+    pub event_tx: Option<mpsc::Sender<ServeEvent>>,
 }
 
 impl Default for ServeOptions {
@@ -80,6 +85,65 @@ impl Default for ServeOptions {
             refresh_secs: DEFAULT_REFRESH_SECS,
             auth: None,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            event_tx: None,
+        }
+    }
+}
+
+/// One client connection seen by the rotating endpoint.
+///
+/// Targets are `host:port` authorities only, never paths or queries.
+#[derive(Debug, Clone)]
+pub enum ServeEvent {
+    /// A parseable request head arrived from a client.
+    Incoming {
+        client: Option<SocketAddr>,
+        method: String,
+        target: String,
+    },
+    /// The connection reached an upstream outcome.
+    Completed {
+        client: Option<SocketAddr>,
+        method: String,
+        target: String,
+        upstream: Option<String>,
+        ok: bool,
+        reason: Option<String>,
+        elapsed: Duration,
+    },
+}
+
+impl std::fmt::Display for ServeEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Incoming {
+                client,
+                method,
+                target,
+            } => {
+                let client = client.map_or("-".to_owned(), |addr| addr.to_string());
+                write!(f, "→ {method} {target} from {client}")
+            }
+            Self::Completed {
+                client: _,
+                method,
+                target,
+                upstream,
+                ok,
+                reason,
+                elapsed,
+            } => {
+                let upstream = upstream.as_deref().unwrap_or("-");
+                if *ok {
+                    write!(f, "✓ {method} {target} via {upstream} {elapsed:?}")
+                } else {
+                    let reason = reason.as_deref().unwrap_or("failed");
+                    write!(
+                        f,
+                        "✗ {method} {target} via {upstream} FAIL {reason} {elapsed:?}"
+                    )
+                }
+            }
         }
     }
 }
@@ -194,6 +258,51 @@ mod tests {
             ServeOptions::default().pool_size,
             DEFAULT_POOL_SIZE,
             "the serve facade must default to the capped pool"
+        );
+    }
+
+    #[test]
+    fn serve_events_render_authorities_without_paths() {
+        let client: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        let incoming = ServeEvent::Incoming {
+            client: Some(client),
+            method: "CONNECT".to_owned(),
+            target: "example.com:443".to_owned(),
+        };
+        assert_eq!(
+            incoming.to_string(),
+            "→ CONNECT example.com:443 from 127.0.0.1:54321"
+        );
+
+        let completed = ServeEvent::Completed {
+            client: Some(client),
+            method: "CONNECT".to_owned(),
+            target: "example.com:443".to_owned(),
+            upstream: Some("192.0.2.1:8080".to_owned()),
+            ok: true,
+            reason: None,
+            elapsed: Duration::from_millis(12),
+        };
+        let rendered = completed.to_string();
+        assert!(
+            rendered.starts_with("✓ CONNECT example.com:443 via 192.0.2.1:8080"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('/'), "authorities must never leak paths");
+
+        let failed = ServeEvent::Completed {
+            client: None,
+            method: "GET".to_owned(),
+            target: "-".to_owned(),
+            upstream: None,
+            ok: false,
+            reason: Some("bad request".to_owned()),
+            elapsed: Duration::from_millis(3),
+        };
+        let rendered = failed.to_string();
+        assert!(
+            rendered.starts_with("✗ GET - via - FAIL bad request"),
+            "{rendered}"
         );
     }
 }
