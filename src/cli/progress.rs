@@ -548,6 +548,16 @@ impl ServeBar {
     }
 }
 
+impl OutputGuard for ServeBar {
+    fn before_write(&self) {
+        self._status.set_visible(false);
+    }
+
+    fn after_write(&self) {
+        self._status.set_visible(true);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
