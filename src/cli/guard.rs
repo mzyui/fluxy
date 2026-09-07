@@ -2,7 +2,9 @@
 use std::io::IsTerminal as _;
 use std::sync::Arc;
 
-use flx::{DownloadProgress, RotatorPool, ValidationProgress};
+use flx::{DownloadProgress, ValidationProgress};
+#[cfg(feature = "serve")]
+use flx::RotatorPool;
 use tokio::sync::watch;
 
 #[cfg(feature = "progress_bar")]
@@ -118,7 +120,7 @@ impl WarmupBar {
     pub fn refresh(&self) {}
 }
 
-#[cfg(feature = "progress_bar")]
+#[cfg(all(feature = "serve", feature = "progress_bar"))]
 pub fn make_serve_bar(
     pool: Arc<RotatorPool>,
     min_ready: usize,
@@ -140,7 +142,7 @@ pub fn make_serve_bar(
     .map(Arc::new)
 }
 
-#[cfg(not(feature = "progress_bar"))]
+#[cfg(all(feature = "serve", not(feature = "progress_bar")))]
 pub fn make_serve_bar(
     _pool: Arc<RotatorPool>,
     _min_ready: usize,

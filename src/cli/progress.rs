@@ -11,7 +11,9 @@ use std::{
 
 use crate::status_line::{Options as StatusLineOptions, StatusLine};
 use crate::style::Colorize;
-use flx::{DownloadProgress, RotatorPool, ValidationProgress};
+use flx::{DownloadProgress, ValidationProgress};
+#[cfg(feature = "serve")]
+use flx::RotatorPool;
 use tokio::sync::watch;
 
 use crate::OutputGuard;
@@ -392,9 +394,12 @@ impl OutputGuard for WarmupBar {
     }
 }
 
+#[cfg(feature = "serve")]
 const SERVE_ICON: &str = "●";
 
 /// Render the persistent serve status: pool fill plus validation counters.
+/// Requires the `serve` Cargo feature.
+#[cfg(feature = "serve")]
 pub struct ServeBar {
     _status: StatusLine<ServeFrame>,
     phase: Arc<Mutex<&'static str>>,
@@ -402,6 +407,7 @@ pub struct ServeBar {
     _cursor: CursorHider,
 }
 
+#[cfg(feature = "serve")]
 struct ServeFrame {
     phase: Arc<Mutex<&'static str>>,
     progress: Arc<Mutex<Option<ValidationProgress>>>,
@@ -414,6 +420,7 @@ struct ServeFrame {
     color: bool,
 }
 
+#[cfg(feature = "serve")]
 impl Display for ServeFrame {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if let Some(dl) = self.download.borrow().as_ref() {
@@ -499,6 +506,7 @@ impl Display for ServeFrame {
     }
 }
 
+#[cfg(feature = "serve")]
 impl ServeBar {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -548,6 +556,7 @@ impl ServeBar {
     }
 }
 
+#[cfg(feature = "serve")]
 impl OutputGuard for ServeBar {
     fn before_write(&self) {
         self._status.set_visible(false);
@@ -562,9 +571,13 @@ impl OutputGuard for ServeBar {
 mod tests {
     use super::{
         cursor_escape, fit_terminal, show_progress, use_color, visible_len, CursorHider, Frame,
-        ServeFrame, WarmupFrame, HIDE_CURSOR, LIVE_CURSOR_HIDERS, SHOW_CURSOR,
+        WarmupFrame, HIDE_CURSOR, LIVE_CURSOR_HIDERS, SHOW_CURSOR,
     };
-    use flx::{DownloadProgress, RotatorPool, Strategy, ValidationProgress};
+    #[cfg(feature = "serve")]
+    use super::ServeFrame;
+    use flx::{DownloadProgress, ValidationProgress};
+    #[cfg(feature = "serve")]
+    use flx::{RotatorPool, Strategy};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, MutexGuard};
     use std::time::{Duration, Instant};
@@ -632,6 +645,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serve")]
     fn serve_frame(
         pool: Arc<RotatorPool>,
         phase: &'static str,
@@ -652,6 +666,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serve")]
     fn serve_pool() -> Arc<RotatorPool> {
         let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
         assert!(pool.add(flx::Proxy::new(std::net::Ipv4Addr::LOCALHOST, 8081)));
@@ -833,6 +848,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "serve")]
     #[test]
     fn serve_frame_shows_filling_pool_with_validation_counters() {
         let (_, download) = watch::channel(None);
@@ -852,6 +868,7 @@ mod tests {
         assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
     }
 
+    #[cfg(feature = "serve")]
     #[test]
     fn serve_frame_switches_to_serving_icon_when_ready() {
         let (_, download) = watch::channel(None);
@@ -867,6 +884,7 @@ mod tests {
         assert!(rendered.contains("pool 1/25"), "{rendered}");
     }
 
+    #[cfg(feature = "serve")]
     #[test]
     fn serve_frame_download_line_wins_over_pool() {
         let (tx, download) = watch::channel(None);
@@ -887,6 +905,7 @@ mod tests {
         assert!(!rendered.contains("pool"), "{rendered}");
     }
 
+    #[cfg(feature = "serve")]
     #[test]
     fn serve_frame_uses_ansi_codes_only_when_colored() {
         let _guard = lock_color();

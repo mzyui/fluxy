@@ -111,7 +111,8 @@ pub enum Command {
     Grab(FetchArgs),
     /// Validate proxies from a file or the built-in providers against online judges.
     Find(FindArgs),
-    /// Serve validated proxies through a local rotating endpoint.
+    /// Serve validated proxies through a local rotating endpoint (requires `--features serve`; experimental).
+    #[cfg(feature = "serve")]
     Serve(ServeArgs),
     /// Download and verify the GeoLite2 GeoIP database.
     #[command(name = "geo-update")]
@@ -402,6 +403,8 @@ pub struct FindArgs {
 }
 
 /// `flx serve`: expose validated proxies through a local rotating endpoint.
+/// Requires the `serve` Cargo feature; build with `--features serve`.
+#[cfg(feature = "serve")]
 #[derive(Args, Debug)]
 pub struct ServeArgs {
     #[command(flatten)]

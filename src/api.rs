@@ -421,6 +421,9 @@ impl Flx {
 
     /// Serves validated proxies via a local rotating endpoint.
     ///
+    /// Requires the `serve` Cargo feature (experimental while serve stays
+    /// suboptimal; build with `--features serve` to enable it).
+    ///
     /// Feeds the pipeline into a [`Rotator`](crate::rotator::Rotator) pool
     /// and blocks until shutdown. Forces readiness when the feed ends.
     ///
@@ -431,6 +434,7 @@ impl Flx {
     /// # Errors
     ///
     /// Propagates [`FlxError`] from [`Flx::stream`] or bind failures.
+    #[cfg(feature = "serve")]
     pub async fn serve(self, options: crate::rotator::ServeOptions) -> Result<(), FlxError> {
         let stream = self.stream().await?;
         let rotator = Arc::new(crate::rotator::Rotator::new(options));
@@ -631,16 +635,19 @@ mod tests {
             flx.fetcher_config.cache_ttl,
             Some(std::time::Duration::from_secs(15 * 60))
         );
-        let serve = crate::rotator::ServeOptions::default();
-        assert_eq!(serve.pool_size, crate::rotator::DEFAULT_POOL_SIZE);
-        assert_eq!(serve.min_ready, crate::rotator::DEFAULT_MIN_READY);
-        assert_eq!(serve.refresh_secs, crate::rotator::DEFAULT_REFRESH_SECS);
-        assert_eq!(
-            serve.request_timeout,
-            crate::rotator::DEFAULT_REQUEST_TIMEOUT
-        );
-        assert_eq!(serve.bind, crate::rotator::DEFAULT_BIND);
-        assert_eq!(serve.port, crate::rotator::DEFAULT_PORT);
+        #[cfg(feature = "serve")]
+        {
+            let serve = crate::rotator::ServeOptions::default();
+            assert_eq!(serve.pool_size, crate::rotator::DEFAULT_POOL_SIZE);
+            assert_eq!(serve.min_ready, crate::rotator::DEFAULT_MIN_READY);
+            assert_eq!(serve.refresh_secs, crate::rotator::DEFAULT_REFRESH_SECS);
+            assert_eq!(
+                serve.request_timeout,
+                crate::rotator::DEFAULT_REQUEST_TIMEOUT
+            );
+            assert_eq!(serve.bind, crate::rotator::DEFAULT_BIND);
+            assert_eq!(serve.port, crate::rotator::DEFAULT_PORT);
+        }
     }
 
     #[test]

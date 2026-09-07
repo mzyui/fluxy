@@ -1,8 +1,8 @@
 use anyhow::Context;
 use argument::Cli;
-use argument::{
-    Command, ConfigAction, ConfigCmd, FetchArgs, FetcherArgs, FindArgs, ServeArgs, ValidatorArgs,
-};
+use argument::{Command, ConfigAction, ConfigCmd, FetchArgs, FetcherArgs, FindArgs, ValidatorArgs};
+#[cfg(feature = "serve")]
+use argument::ServeArgs;
 use clap::{CommandFactory, FromArgMatches};
 #[cfg(feature = "log")]
 use flx::initialize_logging;
@@ -182,6 +182,7 @@ enum RunOutcome {
 
 const SIGINT_EXIT_CODE: u8 = 130;
 /// Poll the serve pool while it fills.
+#[cfg(feature = "serve")]
 const SERVE_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 // Let a second Ctrl+C force-quit stuck phases.
 const FORCE_EXIT_AFTER_PRESSES: usize = 2;
@@ -433,6 +434,7 @@ fn run_application() -> anyhow::Result<RunOutcome> {
         match command {
             Command::Grab(grab) => run_grab(grab, cli.quiet, cli.no_color, &download, cancel).await,
             Command::Find(find) => run_find(find, cli.quiet, cli.no_color, &download, cancel).await,
+            #[cfg(feature = "serve")]
             Command::Serve(serve) => {
                 run_serve(serve, cli.quiet, cli.no_color, &download, cancel).await
             }
@@ -673,6 +675,7 @@ async fn run_grab(
     outcome
 }
 
+#[cfg(feature = "serve")]
 fn parse_serve_credentials(raw: &str) -> anyhow::Result<(String, String)> {
     let (user, pass) = raw
         .split_once(':')
@@ -681,6 +684,7 @@ fn parse_serve_credentials(raw: &str) -> anyhow::Result<(String, String)> {
 }
 
 /// Stream one validated feed from files or providers.
+#[cfg(feature = "serve")]
 async fn validated_stream(
     serve: &ServeArgs,
     protocols: Vec<Protocol>,
@@ -700,11 +704,13 @@ async fn validated_stream(
 }
 
 // Pause validating while the serve pool is full; resume when room frees.
+#[cfg(feature = "serve")]
 fn serve_should_pause(pool_len: usize, pool_size: usize) -> bool {
     pool_len >= pool_size.max(1)
 }
 
 // Print a serve log line without colliding with the status line.
+#[cfg(feature = "serve")]
 fn announce(bar: Option<&impl OutputGuard>, message: &str) {
     match bar {
         Some(bar) => {
@@ -716,6 +722,7 @@ fn announce(bar: Option<&impl OutputGuard>, message: &str) {
     }
 }
 
+#[cfg(feature = "serve")]
 async fn run_serve(
     serve: ServeArgs,
     quiet: bool,

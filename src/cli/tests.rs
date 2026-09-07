@@ -1898,16 +1898,19 @@ fn clap_defaults_match_facade_defaults_field_by_field() {
             .collect::<Vec<_>>(),
         "--https-judge-urls must track DEFAULT_HTTPS_JUDGE_URLS"
     );
-    assert_eq!(
-        clap_default(&command, "min_ready"),
-        flx::rotator::DEFAULT_MIN_READY.to_string(),
-        "--min-ready must track DEFAULT_MIN_READY"
-    );
-    assert_eq!(
-        clap_default(&command, "pool_size"),
-        flx::rotator::DEFAULT_POOL_SIZE.to_string(),
-        "--pool-size must track DEFAULT_POOL_SIZE"
-    );
+    #[cfg(feature = "serve")]
+    {
+        assert_eq!(
+            clap_default(&command, "min_ready"),
+            flx::rotator::DEFAULT_MIN_READY.to_string(),
+            "--min-ready must track DEFAULT_MIN_READY"
+        );
+        assert_eq!(
+            clap_default(&command, "pool_size"),
+            flx::rotator::DEFAULT_POOL_SIZE.to_string(),
+            "--pool-size must track DEFAULT_POOL_SIZE"
+        );
+    }
 }
 
 fn run_with_stats(proxies: &[Proxy]) -> Option<String> {
@@ -2011,6 +2014,7 @@ fn run_stats_summary_is_none_for_an_empty_run() {
     assert!(run_with_stats(&[]).is_none());
 }
 
+#[cfg(feature = "serve")]
 #[test]
 fn serve_pauses_only_when_pool_reaches_its_cap() {
     assert!(!serve_should_pause(0, 25));
@@ -2024,6 +2028,7 @@ fn serve_pauses_only_when_pool_reaches_its_cap() {
     assert!(serve_should_pause(1, 0));
 }
 
+#[cfg(feature = "serve")]
 #[test]
 fn trace_flag_enables_serve_tracing() {
     let traced = Cli::parse_from(["flx", "serve", "--trace"]);

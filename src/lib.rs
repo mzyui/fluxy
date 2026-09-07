@@ -30,6 +30,7 @@ mod api;
 pub mod negotiators;
 pub mod providers;
 pub mod proxy;
+#[cfg(feature = "serve")]
 pub mod rotator;
 pub mod validator;
 
@@ -59,6 +60,7 @@ pub use providers::all_providers;
 pub use providers::models::{ProviderTier, ScrapeMode, Source};
 pub use providers::ProxyProvider;
 pub use proxy::models::{Anonymity, Protocol, Proxy, ProxyType, RuntimeStats};
+#[cfg(feature = "serve")]
 pub use rotator::{Rotator, RotatorPool, ServeEvent, ServeOptions, Strategy};
 pub use validator::{
     Config as ValidatorConfig, JudgeHealthReport, PauseGate, ProxyFailure, ProxyValidator,

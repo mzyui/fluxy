@@ -93,3 +93,6 @@ default = ["log", "progress_bar", "clap"]
 log = ["dep:log"]
 progress_bar = []
 clap = ["dep:clap"]
+# Optional rotating proxy endpoint (`flx serve` + `Flx::serve`).
+# Off by default while serve stays suboptimal; opt in with `--features serve`.
+serve = []

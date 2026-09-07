@@ -422,7 +422,9 @@ fn warn_unknown_sections(cfg: &FileConfig) {
     }
 }
 
-use crate::argument::{Cli, Command, FetcherArgs, OutputOptions, ServeArgs, ValidatorArgs};
+use crate::argument::{Cli, Command, FetcherArgs, OutputOptions, ValidatorArgs};
+#[cfg(feature = "serve")]
+use crate::argument::ServeArgs;
 use clap::parser::ValueSource;
 use clap::ArgMatches;
 
@@ -440,12 +442,20 @@ pub fn apply_config(cli: &mut Cli, cfg: &FileConfig, matches: &ArgMatches) {
             apply_output(&mut find.output, cfg.output.as_ref(), sub);
             apply_validate(&mut find.validator, cfg.validate.as_ref(), sub);
         }
+        #[cfg(feature = "serve")]
         Some(Command::Serve(serve)) => {
             apply_fetch(&mut serve.fetcher, cfg.fetch.as_ref(), sub);
             apply_validate(&mut serve.validator, cfg.validate.as_ref(), sub);
             apply_serve(serve, cfg.serve.as_ref(), sub);
         }
         Some(Command::GeoUpdate) | Some(Command::Config(_)) | None => {}
+    }
+    // Tolerate `[serve]` in files built without the feature: parse + keep it,
+    // but never fail and never apply it.
+    #[cfg(not(feature = "serve"))]
+    if cfg.serve.is_some() {
+        #[cfg(feature = "log")]
+        log::warn!("`[serve]` config ignored without the `serve` cargo feature");
     }
 }
 
@@ -694,6 +704,7 @@ fn apply_validate(
     );
 }
 
+#[cfg(feature = "serve")]
 fn apply_serve(serve: &mut ServeArgs, cfg: Option<&ServeSection>, sub: Option<&ArgMatches>) {
     let Some(cfg) = cfg else { return };
     apply_field!(provided(sub, "bind"), &cfg.bind, serve.bind, |v: String| v
@@ -790,7 +801,7 @@ pub fn template() -> &'static str {
 # support_referer = false
 # report_failures = "failures.jsonl"
 
-[serve]
+[serve]  # requires `--features serve`; ignored otherwise (experimental)
 # bind = "127.0.0.1"
 # port = 8080
 # strategy = "round-robin"              # round-robin|random
@@ -1146,6 +1157,7 @@ http_judges = ["http://azenv.net/"]
         assert_eq!(validator.max_attempts, 3);
     }
 
+    #[cfg(feature = "serve")]
     #[test]
     fn apply_serve_min_ready_from_config() {
         let cfg = parse("[serve]\nmin_ready = 5\npool_size = 50\n").unwrap();
