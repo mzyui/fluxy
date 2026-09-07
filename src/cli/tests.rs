@@ -2037,9 +2037,3 @@ fn trace_flag_enables_serve_tracing() {
         _ => panic!("expected a serve subcommand"),
     }
 }
-#[test]
-fn proxy_count_singularizes_one_proxy() {
-    assert_eq!(proxy_count(0), "0 proxies");
-    assert_eq!(proxy_count(1), "1 proxy");
-    assert_eq!(proxy_count(25), "25 proxies");
-}

@@ -704,14 +704,6 @@ fn serve_should_pause(pool_len: usize, pool_size: usize) -> bool {
     pool_len >= pool_size.max(1)
 }
 
-// Render proxy counts with correct singular/plural.
-fn proxy_count(count: usize) -> String {
-    if count == 1 {
-        "1 proxy".to_owned()
-    } else {
-        format!("{count} proxies")
-    }
-}
 
 // Print a serve log line without colliding with the status line.
 fn announce(bar: Option<&impl OutputGuard>, message: &str) {
@@ -792,14 +784,6 @@ async fn run_serve(
         })
     };
 
-    // Announce live-on-first-proxy before silent refills.
-    announce(
-        serve_bar.as_deref(),
-        &format!(
-            "flx serve filling the pool on {}:{} — goes live on the first validated proxy",
-            serve.bind, serve.port
-        ),
-    );
 
     // Fan cancel notifications out to every serve task.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -816,14 +800,11 @@ async fn run_serve(
         async move { rotator.run().await }
     });
 
-    // Restock the pool without interrupting active connections.
+    // Flip the status line live without interrupting active connections.
     let static_pool = !serve.validator.files.is_empty();
     let live = {
         let pool = Arc::clone(&pool);
         let mut shutdown_rx = shutdown_rx.clone();
-        let bind = serve.bind;
-        let port = serve.port;
-        let strategy = serve.strategy.clone();
         let serve_bar = serve_bar.clone();
         tokio::spawn(async move {
             while pool.ready() == 0 {
@@ -835,13 +816,6 @@ async fn run_serve(
             if let Some(bar) = serve_bar.as_deref() {
                 bar.set_phase("Serving …");
             }
-            announce(
-                serve_bar.as_deref(),
-                &format!(
-                    "flx serve listening on {bind}:{port} (pool: {}, strategy: {strategy})",
-                    proxy_count(pool.ready())
-                ),
-            );
         })
     };
     // Recheck pool room on a fixed cadence while the feed is paused.
