@@ -704,7 +704,6 @@ fn serve_should_pause(pool_len: usize, pool_size: usize) -> bool {
     pool_len >= pool_size.max(1)
 }
 
-
 // Print a serve log line without colliding with the status line.
 fn announce(bar: Option<&impl OutputGuard>, message: &str) {
     match bar {
@@ -757,6 +756,15 @@ async fn run_serve(
         event_tx: Some(event_tx),
         trace: serve.trace,
     };
+    // Fail fast when the endpoint is already claimed (e.g. a stale instance).
+    tokio::net::TcpListener::bind((serve.bind, serve.port))
+        .await
+        .with_context(|| {
+            format!(
+                "failed to bind the rotating endpoint on {}:{}",
+                serve.bind, serve.port
+            )
+        })?;
     let rotator = Arc::new(flx::Rotator::new(options));
     let pool = rotator.pool();
     let pool_size = serve.pool_size.clamp(1, flx::rotator::MAX_POOL_SIZE);
@@ -784,7 +792,6 @@ async fn run_serve(
         })
     };
 
-
     // Fan cancel notifications out to every serve task.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn({
@@ -795,9 +802,10 @@ async fn run_serve(
         }
     });
 
-    let server = tokio::spawn({
+    let mut server = tokio::spawn({
         let rotator = Arc::clone(&rotator);
-        async move { rotator.run().await }
+        let shutdown = shutdown_rx.clone();
+        async move { rotator.run_until_shutdown(shutdown).await }
     });
 
     // Flip the status line live without interrupting active connections.
@@ -857,6 +865,14 @@ async fn run_serve(
                 }
                 _ = shutdown_rx.changed() => break,
                 _ = room_tick.tick() => {}
+                server_result = &mut server => {
+                    // The server only ends early on startup failure.
+                    match server_result {
+                        Ok(Ok(())) => break,
+                        Ok(Err(error)) => return Err(error),
+                        Err(join) => return Err(anyhow::anyhow!("serve task failed: {join}")),
+                    }
+                }
             }
             let full = serve_should_pause(pool.len(), pool_size);
             if full && static_pool {
@@ -899,9 +915,13 @@ async fn run_serve(
             _ = shutdown_rx.changed() => break,
         }
     }
-    let _ = server.await;
+    let server_result = server.await;
     let _ = live.await;
-    Ok(RunOutcome::Cancelled)
+    match server_result {
+        Ok(Ok(())) => Ok(RunOutcome::Cancelled),
+        Ok(Err(error)) => Err(error),
+        Err(join) => Err(anyhow::anyhow!("serve task failed: {join}")),
+    }
 }
 
 async fn run_find(

@@ -230,6 +230,23 @@ impl Rotator {
     ///
     /// Returns an error when the bind address cannot be claimed.
     pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
+        // Never fires: preserves run-until-teardown semantics.
+        let (never, shutdown) = tokio::sync::watch::channel(false);
+        std::mem::forget(never);
+        self.run_until_shutdown(shutdown).await
+    }
+
+    /// Binds, waits for `min_ready` proxies, then serves until `shutdown`.
+    ///
+    /// In-flight connections drain before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bind address cannot be claimed.
+    pub async fn run_until_shutdown(
+        self: Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<()> {
         let address = SocketAddr::new(self.options.bind, self.options.port);
         let listener = TcpListener::bind(address)
             .await
@@ -242,7 +259,13 @@ impl Rotator {
         )
         .await;
 
-        server::accept_loop(listener, Arc::clone(&self.pool), Arc::clone(&self.options)).await;
+        server::accept_loop(
+            listener,
+            Arc::clone(&self.pool),
+            Arc::clone(&self.options),
+            shutdown,
+        )
+        .await;
         Ok(())
     }
 }

@@ -8,6 +8,7 @@ use httparse::Status;
 use tokio::{
     io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    task::JoinSet,
     time,
 };
 
@@ -45,40 +46,51 @@ fn trace(options: &ServeOptions, id: u64, text: String) {
         );
     }
 }
-/// Accept connections until shutdown without head-of-line blocking.
+
+/// Accept connections until shutdown, then drain in-flight relays.
+///
+/// Every relay phase is deadline-bounded, so the drain always terminates.
 pub(super) async fn accept_loop(
     listener: TcpListener,
     pool: Arc<RotatorPool>,
     options: Arc<ServeOptions>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     // Run until runtime teardown aborts the task.
     let mut next_id = 0u64;
+    let mut connections = JoinSet::new();
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                next_id += 1;
-                let id = next_id;
-                if options.trace {
-                    emit(
-                        &options,
-                        super::ServeEvent::Trace {
-                            id,
-                            text: format!("* accepted {addr}"),
-                        },
-                    );
+        tokio::select! {
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, addr)) => {
+                        next_id += 1;
+                        let id = next_id;
+                        if options.trace {
+                            emit(
+                                &options,
+                                super::ServeEvent::Trace {
+                                    id,
+                                    text: format!("* accepted {addr}"),
+                                },
+                            );
+                        }
+                        let pool = Arc::clone(&pool);
+                        let options = Arc::clone(&options);
+                        connections.spawn(handle_connection(id, stream, pool, options));
+                    }
+                    Err(error) => {
+                        #[cfg(feature = "log")]
+                        log::warn!("rotator accept failed: {error}");
+                        #[cfg(not(feature = "log"))]
+                        let _ = error;
+                    }
                 }
-                let pool = Arc::clone(&pool);
-                let options = Arc::clone(&options);
-                tokio::spawn(handle_connection(id, stream, pool, options));
             }
-            Err(error) => {
-                #[cfg(feature = "log")]
-                log::warn!("rotator accept failed: {error}");
-                #[cfg(not(feature = "log"))]
-                let _ = error;
-            }
+            _ = shutdown.changed() => break,
         }
     }
+    while connections.join_next().await.is_some() {}
 }
 
 async fn handle_connection(
@@ -590,7 +602,8 @@ mod tests {
             auth,
             ..ServeOptions::default()
         });
-        tokio::spawn(accept_loop(listener, pool, options));
+        // Never fires: tests drive shutdown by dropping the listener task.
+        tokio::spawn(accept_loop(listener, pool, options, never_shutdown()));
         address
     }
 
@@ -605,6 +618,13 @@ mod tests {
 
     pub(super) fn plain_request(target: SocketAddr) -> String {
         format!("GET http://{target}/ HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n")
+    }
+
+    /// Shutdown channel that never fires (sender is deliberately leaked).
+    pub(super) fn never_shutdown() -> tokio::sync::watch::Receiver<bool> {
+        let (never, shutdown) = tokio::sync::watch::channel(false);
+        std::mem::forget(never);
+        shutdown
     }
 
     #[tokio::test]
@@ -654,7 +674,7 @@ mod tests {
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(accept_loop(listener, pool, options));
+        tokio::spawn(accept_loop(listener, pool, options, never_shutdown()));
 
         let response = exchange(address, plain_request(target).as_bytes())
             .await
@@ -705,6 +725,76 @@ mod tests {
         assert!(
             events.iter().any(|event| matches!(event, ServeEvent::Trace { text, .. } if text.contains("picked upstream"))),
             "trace lines must accompany the summary events: {events:?}"
+        );
+    }
+
+    /// Relay upstream that stalls before replying, so shutdown lands mid-relay.
+    async fn spawn_slow_relay_upstream(target: SocketAddr) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if let Ok(mut upstream) = TcpStream::connect(target).await {
+                        let _ = copy_bidirectional(&mut client, &mut upstream).await;
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_inflight_connections() {
+        let target = spawn_echo_target().await;
+        let upstream = spawn_slow_relay_upstream(target).await;
+        let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
+        assert!(pool.add(proxy_at(upstream)));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let options = Arc::new(ServeOptions::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_loop(listener, pool, options, shutdown_rx));
+
+        let client =
+            tokio::spawn(async move { exchange(address, plain_request(target).as_bytes()).await });
+        // Fire shutdown mid-relay, long before the slow upstream replies.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        shutdown_tx.send(true).unwrap();
+
+        let response = time::timeout(EXCHANGE_BUDGET, client)
+            .await
+            .expect("client must finish")
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{response:?}");
+        time::timeout(EXCHANGE_BUDGET, server)
+            .await
+            .expect("accept loop must return after drain")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_accepting_new_connections() {
+        let target = spawn_echo_target().await;
+        let upstream = spawn_relay_upstream(target).await;
+        let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
+        assert!(pool.add(proxy_at(upstream)));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let options = Arc::new(ServeOptions::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_loop(listener, pool, options, shutdown_rx));
+
+        shutdown_tx.send(true).unwrap();
+        time::timeout(EXCHANGE_BUDGET, server)
+            .await
+            .expect("accept loop must return on shutdown")
+            .unwrap();
+        assert!(
+            TcpStream::connect(address).await.is_err(),
+            "the listener must be gone after shutdown"
         );
     }
 }
