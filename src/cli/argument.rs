@@ -458,6 +458,10 @@ pub struct ServeArgs {
     /// Require `user:pass` basic proxy authentication from clients.
     #[arg(long, help_heading = "Serve")]
     pub auth: Option<String>,
+
+    /// Log a curl-like per-connection timeline to stderr.
+    #[arg(long, help_heading = "Serve")]
+    pub trace: bool,
 }
 
 /// `flx config`: manage the configuration file.

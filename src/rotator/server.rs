@@ -11,7 +11,7 @@ use tokio::{
     time,
 };
 
-use super::{ServeEvent, ServeOptions, REQUEST_HEAD_TIMEOUT};
+use super::{fmt_bytes, fmt_dur, ServeEvent, ServeOptions, REQUEST_HEAD_TIMEOUT};
 use crate::{
     negotiators::{HttpsNegotiator, NegotiatorTrait, Socks4Negotiator, Socks5Negotiator},
     rotator::RotatorPool,
@@ -33,6 +33,18 @@ const RESPONSE_BAD_GATEWAY: &[u8] =
 const RESPONSE_UNAUTHORIZED: &[u8] = b"HTTP/1.1 407 Proxy Authentication Required\r\n\
     Proxy-Authenticate: Basic realm=\"flx\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
+/// Report one curl-like trace line when tracing is enabled.
+fn trace(options: &ServeOptions, id: u64, text: String) {
+    if options.trace {
+        emit(
+            options,
+            super::ServeEvent::Trace {
+                id,
+                text: format!("* {text}"),
+            },
+        );
+    }
+}
 /// Accept connections until shutdown without head-of-line blocking.
 pub(super) async fn accept_loop(
     listener: TcpListener,
@@ -40,12 +52,24 @@ pub(super) async fn accept_loop(
     options: Arc<ServeOptions>,
 ) {
     // Run until runtime teardown aborts the task.
+    let mut next_id = 0u64;
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok((stream, addr)) => {
+                next_id += 1;
+                let id = next_id;
+                if options.trace {
+                    emit(
+                        &options,
+                        super::ServeEvent::Trace {
+                            id,
+                            text: format!("* accepted {addr}"),
+                        },
+                    );
+                }
                 let pool = Arc::clone(&pool);
                 let options = Arc::clone(&options);
-                tokio::spawn(handle_connection(stream, pool, options));
+                tokio::spawn(handle_connection(id, stream, pool, options));
             }
             Err(error) => {
                 #[cfg(feature = "log")]
@@ -58,6 +82,7 @@ pub(super) async fn accept_loop(
 }
 
 async fn handle_connection(
+    id: u64,
     mut client: TcpStream,
     pool: Arc<RotatorPool>,
     options: Arc<ServeOptions>,
@@ -84,6 +109,7 @@ async fn handle_connection(
             emit(
                 &options,
                 ServeEvent::Completed {
+                    id,
                     client: peer,
                     method: "-".to_owned(),
                     target: "-".to_owned(),
@@ -97,9 +123,15 @@ async fn handle_connection(
         }
     };
     let target = format!("{}:{}", request.host, request.port);
+    trace(
+        &options,
+        id,
+        format!("head read {}", fmt_dur(started.elapsed())),
+    );
     emit(
         &options,
         ServeEvent::Incoming {
+            id,
             client: peer,
             method: request.method.clone(),
             target: target.clone(),
@@ -111,6 +143,7 @@ async fn handle_connection(
         emit(
             &options,
             ServeEvent::Completed {
+                id,
                 client: peer,
                 method: request.method.clone(),
                 target,
@@ -128,6 +161,7 @@ async fn handle_connection(
         emit(
             &options,
             ServeEvent::Completed {
+                id,
                 client: peer,
                 method: request.method.clone(),
                 target,
@@ -140,10 +174,28 @@ async fn handle_connection(
         return;
     };
     let via = proxy.as_text().to_owned();
+    trace(
+        &options,
+        id,
+        format!(
+            "picked upstream {via} (pool {}/{})",
+            pool.ready(),
+            options.pool_size
+        ),
+    );
 
-    match open_upstream(&proxy, &request, deadline).await {
+    match open_upstream(&proxy, &request, deadline, id, &options).await {
         Ok(mut upstream) => {
             let _ = upstream.set_nodelay(true);
+            if options.trace {
+                emit(
+                    &options,
+                    super::ServeEvent::Trace {
+                        id,
+                        text: format!("> {} {}", request.method, target),
+                    },
+                );
+            }
             let sent = if request.tunnel {
                 let established = client.write_all(RESPONSE_ESTABLISHED).await.is_ok();
                 let tail_sent = request.forward.is_empty()
@@ -155,18 +207,37 @@ async fn handle_connection(
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .unwrap_or_default();
-            let relayed = sent
-                && time::timeout(remaining, copy_bidirectional(&mut client, &mut upstream))
-                    .await
-                    .is_ok();
+            // Legacy: only the timeout decides; inner io errors still count.
+            let relay_start = Instant::now();
+            let (relayed, up, down) = if !sent {
+                (false, 0, 0)
+            } else {
+                match time::timeout(remaining, copy_bidirectional(&mut client, &mut upstream)).await
+                {
+                    Ok(Ok((up, down))) => (true, up, down),
+                    Ok(Err(_)) => (true, 0, 0),
+                    Err(_) => (false, 0, 0),
+                }
+            };
             if relayed {
                 pool.report_success(&proxy);
+                trace(
+                    &options,
+                    id,
+                    format!(
+                        "relay done up {} down {} in {}",
+                        fmt_bytes(up),
+                        fmt_bytes(down),
+                        fmt_dur(relay_start.elapsed())
+                    ),
+                );
             } else {
                 pool.report_failure(&proxy);
             }
             emit(
                 &options,
                 ServeEvent::Completed {
+                    id,
                     client: peer,
                     method: request.method.clone(),
                     target,
@@ -188,6 +259,7 @@ async fn handle_connection(
             emit(
                 &options,
                 ServeEvent::Completed {
+                    id,
                     client: peer,
                     method: request.method.clone(),
                     target,
@@ -310,50 +382,99 @@ async fn open_upstream(
     proxy: &crate::Proxy,
     request: &ClientRequest,
     deadline: Instant,
+    id: u64,
+    options: &ServeOptions,
 ) -> anyhow::Result<TcpStream> {
     let remaining = || {
         deadline
             .checked_duration_since(Instant::now())
             .context("connection budget exhausted before the upstream connect")
     };
+    let connect_start = Instant::now();
     let mut stream = time::timeout(remaining()?, TcpStream::connect(proxy.as_text()))
         .await
         .with_context(|| format!("timed out connecting to upstream {}", proxy.as_text()))??;
     let _ = stream.set_nodelay(true);
+    trace(
+        options,
+        id,
+        format!("TCP connect {}", fmt_dur(connect_start.elapsed())),
+    );
 
     let proxy_host = proxy.as_text();
     match proxy.expected_types.first() {
         Some(Protocol::Socks4) => {
             let uri = target_uri("http", &request.host, request.port)?;
+            let handshake_start = Instant::now();
             time::timeout(
                 remaining()?,
                 Socks4Negotiator.negotiate(&mut stream, proxy_host, &uri),
             )
             .await
             .with_context(|| format!("SOCKS4 handshake with {proxy_host} timed out"))??;
+            trace(
+                options,
+                id,
+                format!("handshake socks4 {}", fmt_dur(handshake_start.elapsed())),
+            );
         }
         Some(Protocol::Socks5) => {
             let uri = target_uri("http", &request.host, request.port)?;
+            let handshake_start = Instant::now();
             time::timeout(
                 remaining()?,
                 Socks5Negotiator.negotiate(&mut stream, proxy_host, &uri),
             )
             .await
             .with_context(|| format!("SOCKS5 handshake with {proxy_host} timed out"))??;
+            trace(
+                options,
+                id,
+                format!("handshake socks5 {}", fmt_dur(handshake_start.elapsed())),
+            );
         }
         Some(Protocol::Https(_)) if request.tunnel => {
             let uri = target_uri("https", &request.host, request.port)?;
+            let handshake_start = Instant::now();
             time::timeout(
                 remaining()?,
                 HttpsNegotiator.negotiate(&mut stream, proxy_host, &uri),
             )
             .await
             .with_context(|| format!("CONNECT handshake with {proxy_host} timed out"))??;
+            trace(
+                options,
+                id,
+                format!(
+                    "handshake https-connect {}",
+                    fmt_dur(handshake_start.elapsed())
+                ),
+            );
         }
         _ if request.tunnel => {
-            connect_http(&mut stream, &request.host, request.port, remaining()?).await?
+            let handshake_start = Instant::now();
+            let code = connect_http(&mut stream, &request.host, request.port, remaining()?).await?;
+            trace(
+                options,
+                id,
+                format!(
+                    "handshake http-connect {}",
+                    fmt_dur(handshake_start.elapsed())
+                ),
+            );
+            if options.trace {
+                emit(
+                    options,
+                    super::ServeEvent::Trace {
+                        id,
+                        text: format!("< HTTP/1.1 {code}"),
+                    },
+                );
+            }
         }
-        _ => {}
+        _ => {
+            trace(options, id, "direct forward (no handshake)".to_owned());
+        }
     }
     Ok(stream)
 }
@@ -369,7 +490,7 @@ async fn connect_http(
     host: &str,
     port: u16,
     budget: std::time::Duration,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<u16> {
     let authority = if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
@@ -406,7 +527,7 @@ async fn connect_http(
         if code != 200 {
             anyhow::bail!("CONNECT to {authority} returned status {code}");
         }
-        Ok(())
+        Ok(code)
     };
     time::timeout(budget, handshake)
         .await
@@ -514,6 +635,77 @@ mod tests {
         let request = plain_request(target);
         exchange(address, request.as_bytes()).await.unwrap();
         exchange(address, request.as_bytes()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_events_flow_with_matching_ids() {
+        let target = spawn_echo_target().await;
+        let upstream = spawn_relay_upstream(target).await;
+        let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
+        let via = proxy_at(upstream);
+        let via_text = via.as_text().to_owned();
+        assert!(pool.add(via));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+        let options = Arc::new(ServeOptions {
+            event_tx: Some(tx),
+            trace: true,
+            ..ServeOptions::default()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(accept_loop(listener, pool, options));
+
+        let response = exchange(address, plain_request(target).as_bytes())
+            .await
+            .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{response:?}");
+
+        let events = time::timeout(EXCHANGE_BUDGET, async {
+            let mut events = Vec::new();
+            while !events
+                .iter()
+                .any(|event| matches!(event, ServeEvent::Completed { .. }))
+            {
+                match rx.recv().await {
+                    Some(event) => events.push(event),
+                    None => break,
+                }
+            }
+            events
+        })
+        .await
+        .expect("completed event must arrive");
+
+        let id = match events.iter().find_map(|event| match event {
+            ServeEvent::Incoming {
+                id,
+                method,
+                target: event_target,
+                ..
+            } if method == "GET" && *event_target == target.to_string() => Some(*id),
+            _ => None,
+        }) {
+            Some(id) => id,
+            None => panic!("incoming event missing in {events:?}"),
+        };
+        assert!(
+            events.iter().all(|event| match event {
+                ServeEvent::Incoming { id: event_id, .. }
+                | ServeEvent::Completed { id: event_id, .. }
+                | ServeEvent::Trace { id: event_id, .. } => *event_id == id,
+            }),
+            "every event of one connection shares its id: {events:?}"
+        );
+        let completed = events.iter().find_map(|event| match event {
+            ServeEvent::Completed { ok, upstream, .. } => Some((*ok, upstream.clone())),
+            _ => None,
+        });
+        assert_eq!(completed, Some((true, Some(via_text))));
+        assert!(
+            events.iter().any(|event| matches!(event, ServeEvent::Trace { text, .. } if text.contains("picked upstream"))),
+            "trace lines must accompany the summary events: {events:?}"
+        );
     }
 }
 

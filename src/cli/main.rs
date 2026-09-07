@@ -763,6 +763,7 @@ async fn run_serve(
             .map(parse_serve_credentials)
             .transpose()?,
         event_tx: Some(event_tx),
+        trace: serve.trace,
     };
     let rotator = Arc::new(flx::Rotator::new(options));
     let pool = rotator.pool();

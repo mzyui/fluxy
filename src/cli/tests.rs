@@ -2025,6 +2025,19 @@ fn serve_pauses_only_when_pool_reaches_its_cap() {
 }
 
 #[test]
+fn trace_flag_enables_serve_tracing() {
+    let traced = Cli::parse_from(["flx", "serve", "--trace"]);
+    match traced.command {
+        Some(Command::Serve(serve)) => assert!(serve.trace),
+        _ => panic!("expected a serve subcommand"),
+    }
+    let default = Cli::parse_from(["flx", "serve"]);
+    match default.command {
+        Some(Command::Serve(serve)) => assert!(!serve.trace),
+        _ => panic!("expected a serve subcommand"),
+    }
+}
+#[test]
 fn proxy_count_singularizes_one_proxy() {
     assert_eq!(proxy_count(0), "0 proxies");
     assert_eq!(proxy_count(1), "1 proxy");

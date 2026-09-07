@@ -72,6 +72,8 @@ pub struct ServeOptions {
     pub request_timeout: Duration,
     /// Opt-in sink for per-connection events; `None` disables reporting.
     pub event_tx: Option<mpsc::Sender<ServeEvent>>,
+    /// Emit per-phase trace lines (curl-like); needs `event_tx`.
+    pub trace: bool,
 }
 
 impl Default for ServeOptions {
@@ -86,7 +88,32 @@ impl Default for ServeOptions {
             auth: None,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             event_tx: None,
+            trace: false,
         }
+    }
+}
+
+/// Format durations as ms, s, or minutes.
+fn fmt_dur(elapsed: Duration) -> String {
+    if elapsed.as_millis() < 1_000 {
+        format!("{}ms", elapsed.as_millis())
+    } else if elapsed.as_secs() < 60 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+    }
+}
+
+/// Format byte counts as B, KB, or MB.
+fn fmt_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if bytes < KB {
+        format!("{bytes}B")
+    } else if bytes < MB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
     }
 }
 
@@ -97,12 +124,14 @@ impl Default for ServeOptions {
 pub enum ServeEvent {
     /// A parseable request head arrived from a client.
     Incoming {
+        id: u64,
         client: Option<SocketAddr>,
         method: String,
         target: String,
     },
     /// The connection reached an upstream outcome.
     Completed {
+        id: u64,
         client: Option<SocketAddr>,
         method: String,
         target: String,
@@ -111,20 +140,24 @@ pub enum ServeEvent {
         reason: Option<String>,
         elapsed: Duration,
     },
+    /// One curl-like trace line for an in-flight connection.
+    Trace { id: u64, text: String },
 }
 
 impl std::fmt::Display for ServeEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Incoming {
+                id,
                 client,
                 method,
                 target,
             } => {
                 let client = client.map_or("-".to_owned(), |addr| addr.to_string());
-                write!(f, "→ {method} {target} from {client}")
+                write!(f, "[#{id}] → {method} {target} from {client}")
             }
             Self::Completed {
+                id,
                 client: _,
                 method,
                 target,
@@ -135,14 +168,22 @@ impl std::fmt::Display for ServeEvent {
             } => {
                 let upstream = upstream.as_deref().unwrap_or("-");
                 if *ok {
-                    write!(f, "✓ {method} {target} via {upstream} {elapsed:?}")
+                    write!(
+                        f,
+                        "[#{id}] ✓ {method} {target} via {upstream} {}",
+                        fmt_dur(*elapsed)
+                    )
                 } else {
                     let reason = reason.as_deref().unwrap_or("failed");
                     write!(
                         f,
-                        "✗ {method} {target} via {upstream} FAIL {reason} {elapsed:?}"
+                        "[#{id}] ✗ {method} {target} via {upstream} FAIL {reason} {}",
+                        fmt_dur(*elapsed)
                     )
                 }
+            }
+            Self::Trace { id, text } => {
+                write!(f, "[#{id}] {text}")
             }
         }
     }
@@ -265,32 +306,35 @@ mod tests {
     fn serve_events_render_authorities_without_paths() {
         let client: SocketAddr = "127.0.0.1:54321".parse().unwrap();
         let incoming = ServeEvent::Incoming {
+            id: 12,
             client: Some(client),
             method: "CONNECT".to_owned(),
             target: "example.com:443".to_owned(),
         };
         assert_eq!(
             incoming.to_string(),
-            "→ CONNECT example.com:443 from 127.0.0.1:54321"
+            "[#12] → CONNECT example.com:443 from 127.0.0.1:54321"
         );
 
         let completed = ServeEvent::Completed {
+            id: 12,
             client: Some(client),
             method: "CONNECT".to_owned(),
             target: "example.com:443".to_owned(),
             upstream: Some("192.0.2.1:8080".to_owned()),
             ok: true,
             reason: None,
-            elapsed: Duration::from_millis(12),
+            elapsed: Duration::from_millis(1289),
         };
         let rendered = completed.to_string();
-        assert!(
-            rendered.starts_with("✓ CONNECT example.com:443 via 192.0.2.1:8080"),
+        assert_eq!(
+            rendered, "[#12] ✓ CONNECT example.com:443 via 192.0.2.1:8080 1.3s",
             "{rendered}"
         );
         assert!(!rendered.contains('/'), "authorities must never leak paths");
 
         let failed = ServeEvent::Completed {
+            id: 7,
             client: None,
             method: "GET".to_owned(),
             target: "-".to_owned(),
@@ -299,10 +343,29 @@ mod tests {
             reason: Some("bad request".to_owned()),
             elapsed: Duration::from_millis(3),
         };
-        let rendered = failed.to_string();
-        assert!(
-            rendered.starts_with("✗ GET - via - FAIL bad request"),
-            "{rendered}"
+        assert_eq!(
+            failed.to_string(),
+            "[#7] ✗ GET - via - FAIL bad request 3ms"
         );
+
+        let trace = ServeEvent::Trace {
+            id: 12,
+            text: "* TCP connect 4ms".to_owned(),
+        };
+        assert_eq!(trace.to_string(), "[#12] * TCP connect 4ms");
+    }
+
+    #[test]
+    fn fmt_dur_humanizes_durations() {
+        assert_eq!(fmt_dur(Duration::from_millis(12)), "12ms");
+        assert_eq!(fmt_dur(Duration::from_millis(1289)), "1.3s");
+        assert_eq!(fmt_dur(Duration::from_secs(64)), "1m 4s");
+    }
+
+    #[test]
+    fn fmt_bytes_humanizes_counts() {
+        assert_eq!(fmt_bytes(412), "412B");
+        assert_eq!(fmt_bytes(2048), "2.0KB");
+        assert_eq!(fmt_bytes(5 * 1024 * 1024), "5.0MB");
     }
 }
