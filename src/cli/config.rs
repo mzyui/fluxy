@@ -1,14 +1,8 @@
-//! Config file support: TOML defaults layered over CLI flags.
-//!
-//! A config file is a **patch** — it fills values the CLI didn't explicitly
-//! set.  CLI flags always win.  Project `.flx.toml` overrides the user XDG
-//! config key-by-key.
+//! Layer TOML defaults under CLI flags.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-
-// ── Section patch structs ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -74,7 +68,18 @@ pub struct ValidateSection {
     pub report_failures: Option<PathBuf>,
 }
 
-// ── Top-level config ──────────────────────────────────────────────────
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServeSection {
+    pub bind: Option<String>,
+    pub port: Option<u16>,
+    pub strategy: Option<String>,
+    pub pool_size: Option<usize>,
+    pub min_ready: Option<usize>,
+    pub refresh_secs: Option<u64>,
+    pub request_timeout: Option<u64>,
+    pub auth: Option<String>,
+}
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FileConfig {
@@ -82,27 +87,26 @@ pub struct FileConfig {
     pub fetch: Option<FetchSection>,
     pub output: Option<OutputSection>,
     pub validate: Option<ValidateSection>,
+    pub serve: Option<ServeSection>,
     #[serde(skip)]
     pub unknown_sections: Vec<String>,
     #[serde(skip)]
     pub source: Option<PathBuf>,
 }
 
-// ── Discovery ─────────────────────────────────────────────────────────
-
 pub struct Discovery {
     pub project: Option<PathBuf>,
     pub user: Option<PathBuf>,
 }
 
-/// The config files that would be read, in precedence order.
+/// List config files `load` would read without reading them.
 pub struct EffectivePaths {
     pub primary: Option<PathBuf>,
     pub project: Option<PathBuf>,
     pub user: Option<PathBuf>,
 }
 
-/// Resolves the files `load` would read, without reading them.
+/// Resolve files `load` would read without reading them.
 pub fn paths_in_effect(
     config_flag: Option<&Path>,
     env_path: Option<&str>,
@@ -132,10 +136,7 @@ pub fn paths_in_effect(
     }
 }
 
-/// Scans the standard locations for config files without touching the filesystem.
-///
-/// `config_home` is the XDG config directory (`~/.config`); `cwd` is the
-/// current working directory where `.flx.toml` is checked.
+/// Discover configs without touching the filesystem.
 pub fn discover(config_home: &Path, cwd: &Path) -> Discovery {
     let project = cwd.join(".flx.toml");
     let user = config_home.join("flx").join("config.toml");
@@ -145,13 +146,7 @@ pub fn discover(config_home: &Path, cwd: &Path) -> Discovery {
     }
 }
 
-// ── Parse ─────────────────────────────────────────────────────────────
-
-/// Parses a TOML config string, validating every known value.
-///
-/// Unknown top-level **sections** are collected (not rejected) so future
-/// extensions like `[serve]` do not break; unknown **keys** inside a known
-/// section are rejected (`deny_unknown_fields`).
+/// Parse TOML configs while collecting unknown sections.
 pub fn parse(text: &str) -> Result<FileConfig, ConfigError> {
     let value: toml::Value = toml::from_str(text).map_err(ConfigError::parse)?;
     let table = match value {
@@ -166,6 +161,7 @@ pub fn parse(text: &str) -> Result<FileConfig, ConfigError> {
             "fetch" => cfg.fetch = Some(deser_section(value, "fetch")?),
             "output" => cfg.output = Some(deser_section(value, "output")?),
             "validate" => cfg.validate = Some(deser_section(value, "validate")?),
+            "serve" => cfg.serve = Some(deser_section(value, "serve")?),
             other => cfg.unknown_sections.push(other.to_owned()),
         }
     }
@@ -183,10 +179,9 @@ fn deser_section<T: serde::de::DeserializeOwned>(
         .map_err(|e: toml::de::Error| ConfigError::message(format!("[{section}] {e}")))
 }
 
-// ── Value validation ──────────────────────────────────────────────────
-
 const LOG_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
 const IP_TYPES: &[&str] = &["residential", "datacenter", "mobile", "unknown"];
+const SERVE_STRATEGIES: &[&str] = &["round-robin", "random"];
 pub(crate) const FORMATS: &[&str] = &[
     "default",
     "text",
@@ -223,6 +218,16 @@ fn validate_enum_values(cfg: &FileConfig) -> Result<(), ConfigError> {
         }
         for token in o.exclude_types.iter().flatten() {
             ensure_valid_type(token, "output.exclude_types")?;
+        }
+    }
+    if let Some(s) = &cfg.serve {
+        ensure_member(s.strategy.as_deref(), SERVE_STRATEGIES, "serve.strategy")?;
+        if let Some(bind) = &s.bind {
+            if bind.parse::<std::net::IpAddr>().is_err() {
+                return Err(ConfigError::message(format!(
+                    "serve.bind: `{bind}` is not a valid IP address"
+                )));
+            }
         }
     }
     if let Some(v) = &cfg.validate {
@@ -265,8 +270,6 @@ fn ensure_judge_urls(urls: &Option<Vec<String>>, key: &str) -> Result<(), Config
     }
     Ok(())
 }
-
-// ── Merge (layering) ──────────────────────────────────────────────────
 
 trait Overlay {
     fn overlay(self, base: Self) -> Self;
@@ -336,14 +339,25 @@ overlay_section!(ValidateSection {
     support_referer,
     report_failures,
 });
+overlay_section!(ServeSection {
+    bind,
+    port,
+    strategy,
+    pool_size,
+    min_ready,
+    refresh_secs,
+    request_timeout,
+    auth,
+});
 
-/// Merges two configs: `project` values override `user` values per field.
+/// Merge project configs over user configs per field.
 pub fn merge(project: FileConfig, user: FileConfig) -> FileConfig {
     FileConfig {
         global: merge_section(project.global, user.global),
         fetch: merge_section(project.fetch, user.fetch),
         output: merge_section(project.output, user.output),
         validate: merge_section(project.validate, user.validate),
+        serve: merge_section(project.serve, user.serve),
         unknown_sections: {
             let mut all = project.unknown_sections;
             all.extend(user.unknown_sections);
@@ -362,13 +376,7 @@ fn merge_section<T: Overlay>(project: Option<T>, user: Option<T>) -> Option<T> {
     }
 }
 
-// ── Load from disk ────────────────────────────────────────────────────
-
-/// Loads and merges config files following the standard precedence.
-///
-/// 1. `config_flag` (`--config <path>`) or `env_path` (`$FLX_CONFIG`)
-/// 2. `.flx.toml` in `cwd` (project) + `~/.config/flx/config.toml` (user)
-/// 3. `no_config` → `Ok(None)`
+/// Load and merge configs by precedence.
 pub fn load(
     config_flag: Option<&Path>,
     env_path: Option<&str>,
@@ -414,13 +422,13 @@ fn warn_unknown_sections(cfg: &FileConfig) {
     }
 }
 
-// ── Apply to CLI ──────────────────────────────────────────────────────
-
 use crate::argument::{Cli, Command, FetcherArgs, OutputOptions, ValidatorArgs};
+#[cfg(feature = "serve")]
+use crate::argument::ServeArgs;
 use clap::parser::ValueSource;
 use clap::ArgMatches;
 
-/// Applies `cfg` values to `cli` for every field the CLI did **not** set.
+/// Apply unset CLI fields from file configs.
 pub fn apply_config(cli: &mut Cli, cfg: &FileConfig, matches: &ArgMatches) {
     apply_global(cli, cfg.global.as_ref(), matches);
     let sub = matches.subcommand().map(|(_, m)| m);
@@ -434,7 +442,20 @@ pub fn apply_config(cli: &mut Cli, cfg: &FileConfig, matches: &ArgMatches) {
             apply_output(&mut find.output, cfg.output.as_ref(), sub);
             apply_validate(&mut find.validator, cfg.validate.as_ref(), sub);
         }
+        #[cfg(feature = "serve")]
+        Some(Command::Serve(serve)) => {
+            apply_fetch(&mut serve.fetcher, cfg.fetch.as_ref(), sub);
+            apply_validate(&mut serve.validator, cfg.validate.as_ref(), sub);
+            apply_serve(serve, cfg.serve.as_ref(), sub);
+        }
         Some(Command::GeoUpdate) | Some(Command::Config(_)) | None => {}
+    }
+    // Tolerate `[serve]` in files built without the feature: parse + keep it,
+    // but never fail and never apply it.
+    #[cfg(not(feature = "serve"))]
+    if cfg.serve.is_some() {
+        #[cfg(feature = "log")]
+        log::warn!("`[serve]` config ignored without the `serve` cargo feature");
     }
 }
 
@@ -683,9 +704,47 @@ fn apply_validate(
     );
 }
 
-// ── Template & show ───────────────────────────────────────────────────
+#[cfg(feature = "serve")]
+fn apply_serve(serve: &mut ServeArgs, cfg: Option<&ServeSection>, sub: Option<&ArgMatches>) {
+    let Some(cfg) = cfg else { return };
+    apply_field!(provided(sub, "bind"), &cfg.bind, serve.bind, |v: String| v
+        .parse()
+        .unwrap_or(flx::rotator::DEFAULT_BIND));
+    apply_field!(provided(sub, "port"), &cfg.port, serve.port, |v| v);
+    apply_field!(
+        provided(sub, "strategy"),
+        &cfg.strategy,
+        serve.strategy,
+        |v| v
+    );
+    apply_field!(
+        provided(sub, "pool_size"),
+        &cfg.pool_size,
+        serve.pool_size,
+        |v| v
+    );
+    apply_field!(
+        provided(sub, "min_ready"),
+        &cfg.min_ready,
+        serve.min_ready,
+        |v| v
+    );
+    apply_field!(
+        provided(sub, "refresh_secs"),
+        &cfg.refresh_secs,
+        serve.refresh_secs,
+        Some
+    );
+    apply_field!(
+        provided(sub, "request_timeout"),
+        &cfg.request_timeout,
+        serve.request_timeout,
+        Some
+    );
+    apply_field!(provided(sub, "auth"), &cfg.auth, serve.auth, Some);
+}
 
-/// Static commented template for `flx config init`.
+/// Render the commented template for `flx config init`.
 pub fn template() -> &'static str {
     r#"# flx configuration file.
 # CLI flags always win over values here.
@@ -741,10 +800,20 @@ pub fn template() -> &'static str {
 # support_cookies = false
 # support_referer = false
 # report_failures = "failures.jsonl"
+
+[serve]  # requires `--features serve`; ignored otherwise (experimental)
+# bind = "127.0.0.1"
+# port = 8080
+# strategy = "round-robin"              # round-robin|random
+# pool_size = 25
+# min_ready = 1                         # validated proxies required before serving
+# refresh_secs = 300                    # seconds between provider refills
+# request_timeout = 30                  # seconds per client connection
+# auth = "user:pass"                    # basic proxy auth required from clients
 "#
 }
 
-/// Serialises the merged config back to TOML for `flx config show`.
+/// Serialize the merged config back to TOML.
 pub fn to_toml(cfg: &FileConfig) -> String {
     let s = toml::to_string(cfg).unwrap_or_default();
     if s.trim().is_empty() {
@@ -753,8 +822,6 @@ pub fn to_toml(cfg: &FileConfig) -> String {
         s
     }
 }
-
-// ── Error type ────────────────────────────────────────────────────────
 
 use std::fmt;
 
@@ -799,8 +866,6 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-// ── Tests ─────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,8 +892,6 @@ mod tests {
         (cli, matches)
     }
 
-    // ── parse ──
-
     #[test]
     fn parse_empty_config_is_a_no_op() {
         let cfg = parse("").unwrap();
@@ -837,7 +900,6 @@ mod tests {
         assert!(cfg.output.is_none());
         assert!(cfg.validate.is_none());
         assert!(cfg.unknown_sections.is_empty());
-        // comment-only
         assert!(parse("# just a comment\n").unwrap().fetch.is_none());
     }
 
@@ -886,8 +948,10 @@ http_judges = ["http://azenv.net/"]
     #[test]
     fn parse_collects_unknown_top_level_sections() {
         let cfg = parse("[serve]\nport = 8080\n[fetch]\nwith_geo = true\n").unwrap();
-        assert_eq!(cfg.unknown_sections, vec!["serve".to_owned()]);
+        assert_eq!(cfg.serve.unwrap().port, Some(8080));
         assert!(cfg.fetch.is_some());
+        let cfg = parse("[served]\nport = 8080\n").unwrap();
+        assert_eq!(cfg.unknown_sections, vec!["served".to_owned()]);
     }
 
     #[test]
@@ -913,8 +977,6 @@ http_judges = ["http://azenv.net/"]
         assert!(parse("[validate]\nhttps_judges = [\"not a url\"]\n").is_err());
     }
 
-    // ── merge ──
-
     #[test]
     fn merge_project_overrides_user_per_field() {
         let user =
@@ -934,8 +996,6 @@ http_judges = ["http://azenv.net/"]
         );
         assert!(merged.unknown_sections.is_empty());
     }
-
-    // ── discover ──
 
     #[test]
     fn discover_finds_project_and_user_files() {
@@ -957,8 +1017,6 @@ http_judges = ["http://azenv.net/"]
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    // ── load ──
 
     #[test]
     fn load_no_config_returns_none() {
@@ -1011,8 +1069,6 @@ http_judges = ["http://azenv.net/"]
         assert_eq!(fetch.concurrency, Some(5));
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    // ── apply ──
 
     #[test]
     fn apply_cli_flags_beat_config_values() {
@@ -1101,7 +1157,26 @@ http_judges = ["http://azenv.net/"]
         assert_eq!(validator.max_attempts, 3);
     }
 
-    // ── to_toml ──
+    #[cfg(feature = "serve")]
+    #[test]
+    fn apply_serve_min_ready_from_config() {
+        let cfg = parse("[serve]\nmin_ready = 5\npool_size = 50\n").unwrap();
+        let (mut cli, matches) = parse_cli(&["serve"]);
+        apply_config(&mut cli, &cfg, &matches);
+        let serve = match cli.command {
+            Some(Command::Serve(serve)) => serve,
+            _ => panic!("expected serve"),
+        };
+        assert_eq!(serve.min_ready, 5);
+        assert_eq!(serve.pool_size, 50);
+
+        let (cli, _) = parse_cli(&["serve"]);
+        let serve = match cli.command {
+            Some(Command::Serve(serve)) => serve,
+            _ => panic!("expected serve"),
+        };
+        assert_eq!(serve.min_ready, flx::rotator::DEFAULT_MIN_READY);
+    }
 
     #[test]
     fn to_toml_round_trips_set_values() {
@@ -1113,8 +1188,6 @@ http_judges = ["http://azenv.net/"]
         assert_eq!(reparsed.global.unwrap().quiet, Some(true));
         assert_eq!(reparsed.fetch.unwrap().with_geo, Some(true));
     }
-
-    // ── template ──
 
     #[test]
     fn template_mentions_every_section() {

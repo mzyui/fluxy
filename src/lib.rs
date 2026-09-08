@@ -1,25 +1,23 @@
-//! Proxy scraper and validator library.
+//! Fast proxy scraper and validator.
 //!
-//! # Example
+//! The [`Flx`] builder mirrors the CLI defaults.
+//!
+//! # Examples
 //!
 //! ```no_run
 //! use flx::{Anonymity, Flx, Protocol};
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let proxies = Flx::fetch()
-//!         .types([Protocol::Http(Anonymity::Elite)])
-//!         .limit(20)
-//!         .collect()
-//!         .await?;
-//!
-//!     for proxy in &proxies {
-//!         println!("{}", proxy.as_text());
-//!     }
-//!     Ok(())
-//! }
+//! # async fn example() -> anyhow::Result<()> {
+//! let proxies = Flx::fetch()
+//!     .types([Protocol::Http(Anonymity::Elite)])
+//!     .limit(20)
+//!     .collect()
+//!     .await?;
+//! # Ok(())
+//! # }
 //! ```
 
+pub mod base_dirs;
 pub mod error;
 pub mod fetcher;
 pub mod filters;
@@ -32,6 +30,8 @@ mod api;
 pub mod negotiators;
 pub mod providers;
 pub mod proxy;
+#[cfg(feature = "serve")]
+pub mod rotator;
 pub mod validator;
 
 mod resolver;
@@ -44,8 +44,6 @@ use std::{
     path::PathBuf,
     sync::{Arc, LazyLock},
 };
-
-// ── Root re-exports ───────────────────────────────────────────────────
 
 pub use api::{load_proxy_files, Flx, ValidationRun};
 pub use error::{FlxError, ProtocolParseError, ProxyParseError};
@@ -62,42 +60,117 @@ pub use providers::all_providers;
 pub use providers::models::{ProviderTier, ScrapeMode, Source};
 pub use providers::ProxyProvider;
 pub use proxy::models::{Anonymity, Protocol, Proxy, ProxyType, RuntimeStats};
+#[cfg(feature = "serve")]
+pub use rotator::{Rotator, RotatorPool, ServeEvent, ServeOptions, Strategy};
 pub use validator::{
-    Config as ValidatorConfig, JudgeHealthReport, ProxyFailure, ProxyValidator, ValidationProgress,
-    ValidationStatus,
+    Config as ValidatorConfig, JudgeHealthReport, PauseGate, ProxyFailure, ProxyValidator,
+    ValidationProgress, ValidationStatus,
 };
 
-/// Convenience glob for common types.
+/// Re-exports common types.
 pub mod prelude {
     pub use crate::{
         all_providers, load_proxy_files, sync_database, Anonymity, FetcherConfig, Flx, FlxError,
-        GeoData, GeoLookup, IpType, JudgeHealthReport, Protocol, Proxy, ProxyFailure, ProxyFetcher,
-        ProxyParseError, ProxySource, ProxyStreamExt, ProxyType, ProxyValidator, RuntimeStats,
-        ScrapeMode, SortKey, SortOrder, Source, SyncOutcome, ValidationProgress, ValidationRun,
-        ValidatorConfig,
+        GeoData, GeoLookup, IpType, JudgeHealthReport, PauseGate, Protocol, Proxy, ProxyFailure,
+        ProxyFetcher, ProxyParseError, ProxySource, ProxyStreamExt, ProxyType, ProxyValidator,
+        RuntimeStats, ScrapeMode, SortKey, SortOrder, Source, SyncOutcome, ValidationProgress,
+        ValidationRun, ValidatorConfig,
     };
 }
 
-/// Initializes the logging system.
+/// Initializes logging.
 #[cfg(feature = "log")]
 pub fn initialize_logging(log_level: log::LevelFilter) -> anyhow::Result<()> {
-    #[cfg(feature = "log")]
-    stderrlog::new()
-        .module(module_path!())
-        .show_module_names(true)
-        .verbosity(log_level)
-        .init()?;
+    log::set_boxed_logger(Box::new(FlxLogger))?;
+    log::set_max_level(log_level);
     Ok(())
 }
 
-/// File-backed proxy source. Scheme-prefixed lines pin their own protocol;
-/// bare `ip:port` lines inherit the file's default protocol set.
+/// Writes flx records to stderr with tty-gated colors.
+#[cfg(feature = "log")]
+struct FlxLogger;
+
+#[cfg(feature = "log")]
+const LOG_MODULE_ROOT: &str = "flx";
+
+#[cfg(feature = "log")]
+fn log_module_allowed(target: &str) -> bool {
+    match target.strip_prefix(LOG_MODULE_ROOT) {
+        // Matches Rust module paths split by `::`.
+        Some(rest) => rest.is_empty() || rest.starts_with("::"),
+        None => false,
+    }
+}
+
+#[cfg(feature = "log")]
+fn log_prefix_color(level: log::Level) -> &'static str {
+    match level {
+        log::Level::Error => "\x1b[31m",
+        log::Level::Warn => "\x1b[33m",
+        log::Level::Info => "\x1b[34m",
+        log::Level::Debug => "\x1b[36m",
+        log::Level::Trace => "\x1b[35m",
+    }
+}
+
+#[cfg(feature = "log")]
+impl FlxLogger {
+    fn color_enabled() -> bool {
+        use std::io::IsTerminal as _;
+        match std::env::var_os("TERM") {
+            None => return false,
+            Some(term) => {
+                if term == "dumb" {
+                    return false;
+                }
+            }
+        }
+        if std::env::var_os("NO_COLOR").is_some() {
+            return false;
+        }
+        std::io::stderr().is_terminal()
+    }
+}
+
+#[cfg(feature = "log")]
+impl log::Log for FlxLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::max_level() && log_module_allowed(metadata.target())
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let mut stderr = std::io::stderr().lock();
+        if Self::color_enabled() {
+            // Keeps prefix bytes identical to the previous logger.
+            let _ = write!(
+                stderr,
+                "\x1b[0m{}{}: {} ",
+                log_prefix_color(record.level()),
+                record.target(),
+                record.level()
+            );
+            let _ = write!(stderr, "\x1b[0m");
+        } else {
+            let _ = write!(stderr, "{}: {} ", record.target(), record.level());
+        }
+        let _ = writeln!(stderr, "{}", record.args());
+    }
+
+    fn flush(&self) {
+        let _ = std::io::stderr().flush();
+    }
+}
+
+/// Reads proxies from files with per-line protocol pinning.
 pub struct ProxySource {
     lines: Lines<Box<dyn BufRead + Send>>,
     default_proxy_types: Arc<[Protocol]>,
 }
 
-/// Default protocol set inherited by proxies read from a file.
+/// Defines fallback protocols for bare ip:port lines.
 static FILE_DEFAULT_PROTOCOLS: LazyLock<Arc<[Protocol]>> = LazyLock::new(|| {
     Arc::from([
         Protocol::Http(Anonymity::Unknown),
@@ -107,8 +180,7 @@ static FILE_DEFAULT_PROTOCOLS: LazyLock<Arc<[Protocol]>> = LazyLock::new(|| {
     ])
 });
 
-/// Writes `args` into `buf` using `Cursor`, returning a borrowed view of the
-/// written region when possible and an owned `String` only for overlong output.
+/// Formats args into buf, borrowing when it fits.
 pub(crate) fn write_to_buffer<'a>(
     buf: &'a mut [u8],
     args: std::fmt::Arguments<'_>,
@@ -128,7 +200,6 @@ impl ProxySource {
         ProxyFetcher::gather(config).await
     }
 
-    /// Opens an ip:port file for reading.
     pub fn from_file(filepath: PathBuf) -> anyhow::Result<Self> {
         let file = anyhow::Context::with_context(File::open(&filepath), || {
             format!("failed to open proxy file {}", filepath.display())
@@ -136,7 +207,6 @@ impl ProxySource {
         Self::from_reader(BufReader::new(file))
     }
 
-    /// Reads proxies from any buffered reader.
     pub fn from_reader<R: BufRead + Send + 'static>(reader: R) -> anyhow::Result<Self> {
         let lines = (Box::new(reader) as Box<dyn BufRead + Send>).lines();
 
@@ -148,7 +218,6 @@ impl ProxySource {
         })
     }
 
-    /// Reads proxies from standard input.
     pub fn from_stdin() -> anyhow::Result<Self> {
         Self::from_reader(std::io::BufReader::new(std::io::stdin()))
     }
@@ -183,9 +252,7 @@ impl Iterator for ProxySource {
                     continue;
                 }
             };
-            // A scheme prefixed line pins its protocol (`http://...` → HTTP);
-            // a bare `ip:port` line carries no scheme, so it inherits the
-            // file-wide default protocol set.
+            // Pins scheme-prefixed lines; bare lines inherit defaults.
             if proxy.expected_types.is_empty() {
                 proxy.expected_types = Arc::clone(&self.default_proxy_types);
             }
@@ -272,5 +339,30 @@ mod tests {
         assert_eq!(proxies.len(), 2);
         assert_eq!(proxies[0].expected_types.as_ref(), &[Protocol::Socks4]);
         assert_eq!(proxies[1].expected_types, *FILE_DEFAULT_PROTOCOLS);
+    }
+
+    #[cfg(feature = "log")]
+    #[test]
+    fn log_module_gate_accepts_only_crate_targets() {
+        use super::log_module_allowed;
+
+        assert!(log_module_allowed("flx"));
+        assert!(log_module_allowed("flx::validator::work"));
+        assert!(!log_module_allowed("other_crate"));
+        assert!(!log_module_allowed("flx2"));
+        assert!(!log_module_allowed("fl"));
+    }
+
+    #[cfg(feature = "log")]
+    #[test]
+    fn log_prefix_colors_match_the_documented_palette() {
+        use super::log_prefix_color;
+        use log::Level;
+
+        assert_eq!(log_prefix_color(Level::Error), "\x1b[31m");
+        assert_eq!(log_prefix_color(Level::Warn), "\x1b[33m");
+        assert_eq!(log_prefix_color(Level::Info), "\x1b[34m");
+        assert_eq!(log_prefix_color(Level::Debug), "\x1b[36m");
+        assert_eq!(log_prefix_color(Level::Trace), "\x1b[35m");
     }
 }

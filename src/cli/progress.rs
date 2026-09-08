@@ -1,4 +1,4 @@
-//! Validation progress status line.
+//! Render validation progress on stderr.
 
 use std::{
     fmt::{Display, Formatter},
@@ -10,21 +10,21 @@ use std::{
 };
 
 use crate::status_line::{Options as StatusLineOptions, StatusLine};
-use colored::Colorize;
+use crate::style::Colorize;
 use flx::{DownloadProgress, ValidationProgress};
+#[cfg(feature = "serve")]
+use flx::RotatorPool;
 use tokio::sync::watch;
 
 use crate::OutputGuard;
 
-// Single-glyph accents: color lives only here, never on a whole line.
 const VALIDATING_ICON: &str = "▸";
 const PHASE_ICON: &str = "⟳";
 const DOWNLOAD_ICON: &str = "⇣";
 const GATHER_ICON: &str = "✦";
 const ELLIPSIS_TAIL: &str = " …";
 
-/// Compose `<icon> <phase>` with the trailing ellipsis de-emphasized so a
-/// repaint never paints the whole line in one hue.
+/// Compose icon-phase lines without whole-line hues.
 fn phase_line(phase: &str, color: bool) -> String {
     let body = phase.trim_end();
     let (text, tail) = match body.strip_suffix('…') {
@@ -42,7 +42,6 @@ const SHOW_CURSOR: &str = "\x1b[?25h";
 
 static LIVE_CURSOR_HIDERS: AtomicUsize = AtomicUsize::new(0);
 
-/// Escape to emit for a live-handle count transition, if any.
 fn cursor_escape(prev: usize, next: usize) -> Option<&'static str> {
     match (prev, next) {
         (0, 1) => Some(HIDE_CURSOR),
@@ -54,16 +53,14 @@ fn cursor_escape(prev: usize, next: usize) -> Option<&'static str> {
 fn apply_cursor_escape(escape: Option<&'static str>) {
     use std::io::{IsTerminal as _, Write as _};
     if let Some(escape) = escape {
-        // Bars only exist on a TTY stderr; the check keeps tests and
-        // redirected runs free of stray control sequences.
+        // Emit escapes only on TTY stderr.
         if std::io::stderr().is_terminal() {
             let _ = std::io::stderr().lock().write_all(escape.as_bytes());
         }
     }
 }
 
-/// A forced exit skips the `CursorHider` destructors, so the cursor must be
-/// un-hidden manually before the process leaves.
+/// Restore the cursor after forced exits skip destructors.
 pub(crate) fn force_show_cursor() {
     use std::io::{IsTerminal as _, Write as _};
     if LIVE_CURSOR_HIDERS.load(Ordering::Acquire) > 0 && std::io::stderr().is_terminal() {
@@ -71,8 +68,7 @@ pub(crate) fn force_show_cursor() {
     }
 }
 
-/// Refcounted RAII hiding the terminal cursor while any status bar lives.
-/// Escapes are idempotent, so racing drops may repeat them harmlessly.
+/// Hide the cursor while any status bar lives.
 struct CursorHider;
 
 impl CursorHider {
@@ -90,12 +86,10 @@ impl Drop for CursorHider {
     }
 }
 
-/// Current terminal width in columns, or `None` when it cannot be determined.
 fn terminal_width() -> Option<usize> {
     #[cfg(unix)]
     {
-        // SAFETY: `ws` is a zeroed struct and TIOCGWINSZ only writes the window
-        // size into it; stderr (fd 2) is always a valid file descriptor.
+        // SAFETY: TIOCGWINSZ only writes the window size into ws.
         let ws_col = unsafe {
             let mut ws: libc::winsize = std::mem::zeroed();
             if libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 {
@@ -114,14 +108,12 @@ fn terminal_width() -> Option<usize> {
         .filter(|&w| w > 0)
 }
 
-/// Visible column length of `s`, ignoring ANSI escape sequences (which occupy
-/// no terminal columns). Each non-escape char counts as one column.
+/// Measure visible columns ignoring ANSI escapes.
 fn visible_len(s: &str) -> usize {
     let mut len = 0;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // Skip the rest of the escape sequence (ends on its final letter).
             for e in chars.by_ref() {
                 if e.is_ascii_alphabetic() {
                     break;
@@ -134,8 +126,7 @@ fn visible_len(s: &str) -> usize {
     len
 }
 
-/// Copy `s` up to `width` visible columns, preserving whole escape sequences
-/// intact so a truncation never lands inside an escape code.
+/// Truncate to visible columns without splitting escapes.
 fn truncate_to_visible(s: &str, width: usize) -> String {
     let mut out = String::with_capacity(s.len());
     let mut vis = 0;
@@ -161,10 +152,7 @@ fn truncate_to_visible(s: &str, width: usize) -> String {
     out
 }
 
-/// Fit a rendered line to the terminal width: truncate overflow to exactly
-/// `width` visible columns (closing any open color) and pad shorter lines with
-/// spaces so the bar always spans the full terminal width. `None` width leaves
-/// the line untouched. ANSI escapes are counted as zero width.
+/// Fit lines to terminal width with padding or truncation.
 fn fit_terminal(line: String, color: bool, width: Option<usize>) -> String {
     let width = match width {
         Some(w) if w > 0 => w,
@@ -236,9 +224,7 @@ fn show_progress(quiet: bool, stderr_is_terminal: bool, stdout_is_pipe: bool) ->
     !quiet && stderr_is_terminal && !stdout_is_pipe
 }
 
-// Warmup bars clash with streamed stdout data, so for commands that print their
-// payload to stdout (e.g. `grab`) the bar is hidden on a TTY and shown only when
-// output is redirected (a file via `-o` or a piped stdout) where stderr stays clean.
+// Hide warmup bars on TTY stdout to avoid clashing with payloads.
 fn show_warmup(
     quiet: bool,
     stderr_is_terminal: bool,
@@ -269,8 +255,6 @@ impl ValidationBar {
         if !show_progress(quiet, std::io::stderr().is_terminal(), stdout_is_pipe) {
             return None;
         }
-        // The global `colored` override is set once in `run_application`, so
-        // the bar respects `--no-color` like the end-of-run summary.
         let _cursor = CursorHider::acquire();
         let status = StatusLine::new(Frame::new(progress, use_color(no_color)));
         Some(Self {
@@ -290,8 +274,7 @@ impl ValidationBar {
 
 impl OutputGuard for ValidationBar {
     fn before_write(&self) {
-        // The bar only exists when stdout reaches the same terminal, so every
-        // stdout write needs the line hidden until it is flushed.
+        // Hide the bar while stdout writes to the same terminal.
         self.hide();
     }
 
@@ -300,7 +283,7 @@ impl OutputGuard for ValidationBar {
     }
 }
 
-/// Repaintable warmup phase line shown before the validation bar takes over.
+/// Render warmup phases before validation starts.
 pub struct WarmupBar {
     status: StatusLine<WarmupFrame>,
     phase: Arc<Mutex<&'static str>>,
@@ -411,27 +394,199 @@ impl OutputGuard for WarmupBar {
     }
 }
 
+#[cfg(feature = "serve")]
+const SERVE_ICON: &str = "●";
+
+/// Render the persistent serve status: pool fill plus validation counters.
+/// Requires the `serve` Cargo feature.
+#[cfg(feature = "serve")]
+pub struct ServeBar {
+    _status: StatusLine<ServeFrame>,
+    phase: Arc<Mutex<&'static str>>,
+    progress: Arc<Mutex<Option<ValidationProgress>>>,
+    _cursor: CursorHider,
+}
+
+#[cfg(feature = "serve")]
+struct ServeFrame {
+    phase: Arc<Mutex<&'static str>>,
+    progress: Arc<Mutex<Option<ValidationProgress>>>,
+    pool: Arc<RotatorPool>,
+    min_ready: usize,
+    pool_size: usize,
+    endpoint: String,
+    download: watch::Receiver<Option<DownloadProgress>>,
+    started: Instant,
+    color: bool,
+}
+
+#[cfg(feature = "serve")]
+impl Display for ServeFrame {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(dl) = self.download.borrow().as_ref() {
+            let detail = if dl.total > 0 {
+                let pct = (dl.downloaded as f64 / dl.total as f64) * 100.0;
+                format!("{ELLIPSIS_TAIL} {pct:.2}%")
+            } else {
+                let mb = dl.downloaded as f64 / (1024.0 * 1024.0);
+                format!("{ELLIPSIS_TAIL} {mb:.1} MB")
+            };
+            let line = if self.color {
+                format!("{} {}{}", DOWNLOAD_ICON.cyan(), dl.name, detail.dimmed())
+            } else {
+                format!("{DOWNLOAD_ICON} {}{detail}", dl.name)
+            };
+            return f.write_str(&fit_terminal(line, self.color, terminal_width()));
+        }
+        let ready = self.pool.ready();
+        let stored = self.pool.len();
+        let live = ready >= self.min_ready.max(1);
+        let icon = if live { SERVE_ICON } else { PHASE_ICON };
+        let phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        let pool_part = if live {
+            format!("pool {ready}/{}", self.pool_size)
+        } else {
+            format!("pool {ready}/{} ready", self.min_ready)
+        };
+        let stored_part = if stored != ready {
+            format!(" (stored {stored})")
+        } else {
+            String::new()
+        };
+        let line = match self
+            .progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            Some(progress) => {
+                let done = progress.done();
+                let total = progress.total();
+                let passed = progress.passed();
+                let failed = done.saturating_sub(passed);
+                let elapsed = self.started.elapsed().as_secs_f64();
+                let rate = if elapsed > 0.0 {
+                    done as f64 / elapsed
+                } else {
+                    0.0
+                };
+                if self.color {
+                    format!(
+                        "{} {} · {} · {pool_part}{stored_part} · Validating {done}/{total} · {} · {} ({rate:.0}/s)",
+                        icon.cyan(),
+                        phase.bold(),
+                        self.endpoint.as_str().dimmed(),
+                        format!("{passed} valid").green(),
+                        format!("{failed} fail").red(),
+                    )
+                } else {
+                    format!(
+                        "{icon} {phase} · {} · {pool_part}{stored_part} · Validating {done}/{total} · {passed} valid · {failed} fail ({rate:.0}/s)",
+                        self.endpoint
+                    )
+                }
+            }
+            None => {
+                if self.color {
+                    format!(
+                        "{} {} · {} · {pool_part}{stored_part}",
+                        icon.cyan(),
+                        phase.bold(),
+                        self.endpoint.as_str().dimmed(),
+                    )
+                } else {
+                    format!(
+                        "{icon} {phase} · {} · {pool_part}{stored_part}",
+                        self.endpoint
+                    )
+                }
+            }
+        };
+        f.write_str(&fit_terminal(line, self.color, terminal_width()))
+    }
+}
+
+#[cfg(feature = "serve")]
+impl ServeBar {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pool: Arc<RotatorPool>,
+        min_ready: usize,
+        pool_size: usize,
+        endpoint: String,
+        quiet: bool,
+        no_color: bool,
+        download: watch::Receiver<Option<DownloadProgress>>,
+    ) -> Option<Self> {
+        use std::io::IsTerminal as _;
+
+        // Serve writes no stdout payload, so only stderr TTY and quiet matter.
+        if quiet || !std::io::stderr().is_terminal() {
+            return None;
+        }
+        let _cursor = CursorHider::acquire();
+        let phase = Arc::new(Mutex::new("Filling the pool …"));
+        let progress = Arc::new(Mutex::new(None));
+        let frame = ServeFrame {
+            phase: Arc::clone(&phase),
+            progress: Arc::clone(&progress),
+            pool,
+            min_ready,
+            pool_size,
+            endpoint,
+            download,
+            started: Instant::now(),
+            color: use_color(no_color),
+        };
+        let status = StatusLine::with_options(frame, StatusLineOptions::default());
+        Some(Self {
+            _status: status,
+            phase,
+            progress,
+            _cursor,
+        })
+    }
+
+    pub fn set_phase(&self, phase: &'static str) {
+        *self.phase.lock().unwrap_or_else(|e| e.into_inner()) = phase;
+    }
+
+    pub fn set_progress(&self, progress: ValidationProgress) {
+        *self.progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(progress);
+    }
+}
+
+#[cfg(feature = "serve")]
+impl OutputGuard for ServeBar {
+    fn before_write(&self) {
+        self._status.set_visible(false);
+    }
+
+    fn after_write(&self) {
+        self._status.set_visible(true);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         cursor_escape, fit_terminal, show_progress, use_color, visible_len, CursorHider, Frame,
         WarmupFrame, HIDE_CURSOR, LIVE_CURSOR_HIDERS, SHOW_CURSOR,
     };
+    #[cfg(feature = "serve")]
+    use super::ServeFrame;
     use flx::{DownloadProgress, ValidationProgress};
+    #[cfg(feature = "serve")]
+    use flx::{RotatorPool, Strategy};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, MutexGuard};
     use std::time::{Duration, Instant};
     use tokio::sync::watch;
 
-    // `colored`'s color decision is a process-global override, so the tests
-    // that render colored output must not interleave with each other.
-    static COLOR_LOCK: Mutex<()> = Mutex::new(());
-
     fn lock_color() -> MutexGuard<'static, ()> {
-        COLOR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::style::color_lock()
     }
 
-    // The live-cursor-hider count is process-global like `colored`'s override.
     static CURSOR_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -469,9 +624,9 @@ mod tests {
 
     fn with_color<T>(f: impl FnOnce() -> T) -> T {
         let _guard = lock_color();
-        colored::control::set_override(true);
+        crate::style::set_override(true);
         let result = f();
-        colored::control::set_override(false);
+        crate::style::set_override(false);
         result
     }
 
@@ -488,6 +643,34 @@ mod tests {
             started: Instant::now() - Duration::from_secs(4),
             color,
         }
+    }
+
+    #[cfg(feature = "serve")]
+    fn serve_frame(
+        pool: Arc<RotatorPool>,
+        phase: &'static str,
+        progress: Option<ValidationProgress>,
+        download: watch::Receiver<Option<DownloadProgress>>,
+        color: bool,
+    ) -> ServeFrame {
+        ServeFrame {
+            phase: Arc::new(Mutex::new(phase)),
+            progress: Arc::new(Mutex::new(progress)),
+            pool,
+            min_ready: 1,
+            pool_size: 25,
+            endpoint: "127.0.0.1:8080".to_owned(),
+            download,
+            started: Instant::now() - Duration::from_secs(4),
+            color,
+        }
+    }
+
+    #[cfg(feature = "serve")]
+    fn serve_pool() -> Arc<RotatorPool> {
+        let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
+        assert!(pool.add(flx::Proxy::new(std::net::Ipv4Addr::LOCALHOST, 8081)));
+        pool
     }
 
     #[test]
@@ -524,7 +707,6 @@ mod tests {
         assert!(rendered.starts_with("\x1b[36m⇣\x1b[0m GeoLite2-City.mmdb"));
         assert!(rendered.contains("\x1b[2m … 40.00%\x1b[0m"));
         assert!(rendered.ends_with("\x1b[0m"));
-        // No whole-line hue: the old full-line cyan-bold must stay gone.
         assert!(!rendered.contains("\x1b[1;36m"));
     }
 
@@ -571,8 +753,6 @@ mod tests {
         assert!(show_progress(false, true, false));
         assert!(!show_progress(true, true, false));
         assert!(!show_progress(false, false, false));
-        // A piped stdout means a downstream process owns the terminal; the bar
-        // must stay quiet there. Redirecting to a regular file keeps the bar.
         assert!(!show_progress(false, true, true));
     }
 
@@ -602,18 +782,17 @@ mod tests {
         assert!(colored.starts_with("\x1b[36m▸\x1b[0m "));
         assert!(colored.contains("\x1b[1mValidating\x1b[0m"));
         assert!(colored.contains("\x1b[2m (0/s)\x1b[0m"));
-        // The label must not carry the icon's cyan on top of bold.
         assert!(!colored.contains("\x1b[1;36mValidating"));
     }
 
     #[test]
     fn frame_uses_ansi_codes_only_when_colored() {
         let _guard = lock_color();
-        colored::control::set_override(false);
+        crate::style::set_override(false);
         let plain = Frame::new(ValidationProgress::default(), false).to_string();
-        colored::control::set_override(true);
+        crate::style::set_override(true);
         let colored = Frame::new(ValidationProgress::default(), true).to_string();
-        colored::control::set_override(false);
+        crate::style::set_override(false);
 
         assert!(!plain.contains('\x1b'));
         assert!(colored.contains('\x1b'));
@@ -621,7 +800,6 @@ mod tests {
 
     #[test]
     fn fit_terminal_pads_short_lines_to_width() {
-        // Shorter-than-terminal lines are padded to exactly the terminal width.
         let colored = fit_terminal("Validating 0/0".to_string(), true, Some(200));
         assert!(colored.starts_with("Validating 0/0\x1b[0m"));
         assert_eq!(visible_len(&colored), 200);
@@ -642,20 +820,17 @@ mod tests {
     #[test]
     fn fit_terminal_appends_reset_when_colored() {
         let line = "abcdefghijkl".to_string();
-        // 12 visible at width 10: truncate to 10 visible, then close color.
         assert_eq!(fit_terminal(line, true, Some(10)), "abcdefghij\x1b[0m");
     }
 
     #[test]
     fn fit_terminal_truncates_visible_columns_only() {
-        // 10 visible at width 5: truncate to 5 visible columns.
         let line = "abcdefghij".to_string();
         assert_eq!(fit_terminal(line, true, Some(5)), "abcde\x1b[0m");
     }
 
     #[test]
     fn fit_terminal_ignores_ansi_in_length() {
-        // Escape codes carry zero visible width; "Validatingx" is 11 visible.
         let line = "\x1b[1;36mValidatingx\x1b[0m".to_string();
         assert_eq!(visible_len(&line), 11);
         assert_eq!(fit_terminal(line, true, Some(5)), "\x1b[1;36mValid\x1b[0m");
@@ -671,5 +846,78 @@ mod tests {
             ),
             "a very long line that should remain"
         );
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn serve_frame_shows_filling_pool_with_validation_counters() {
+        let (_, download) = watch::channel(None);
+        let pool = Arc::new(RotatorPool::new(Strategy::RoundRobin));
+        let frame = serve_frame(
+            pool,
+            "Filling the pool …",
+            Some(ValidationProgress::default()),
+            download,
+            false,
+        );
+        let rendered = frame.to_string();
+        assert!(rendered.starts_with("⟳"), "{rendered}");
+        assert!(rendered.contains("Filling the pool"), "{rendered}");
+        assert!(rendered.contains("pool 0/1 ready"), "{rendered}");
+        assert!(rendered.contains("Validating 0/0"), "{rendered}");
+        assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn serve_frame_switches_to_serving_icon_when_ready() {
+        let (_, download) = watch::channel(None);
+        let frame = serve_frame(
+            serve_pool(),
+            "Serving …",
+            Some(ValidationProgress::default()),
+            download,
+            false,
+        );
+        let rendered = frame.to_string();
+        assert!(rendered.starts_with("●"), "{rendered}");
+        assert!(rendered.contains("pool 1/25"), "{rendered}");
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn serve_frame_download_line_wins_over_pool() {
+        let (tx, download) = watch::channel(None);
+        tx.send_replace(Some(DownloadProgress {
+            name: "GeoLite2-City.mmdb",
+            downloaded: 400,
+            total: 1000,
+        }));
+        let frame = serve_frame(
+            serve_pool(),
+            "Serving …",
+            Some(ValidationProgress::default()),
+            download,
+            false,
+        );
+        let rendered = frame.to_string();
+        assert!(rendered.contains("GeoLite2-City.mmdb"), "{rendered}");
+        assert!(!rendered.contains("pool"), "{rendered}");
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn serve_frame_uses_ansi_codes_only_when_colored() {
+        let _guard = lock_color();
+        crate::style::set_override(false);
+        let (_, download) = watch::channel(None);
+        let plain = serve_frame(serve_pool(), "Serving …", None, download, false).to_string();
+        let (_, download) = watch::channel(None);
+        crate::style::set_override(true);
+        let colored = serve_frame(serve_pool(), "Serving …", None, download, true).to_string();
+        crate::style::set_override(false);
+
+        assert!(!plain.contains('\x1b'), "{plain}");
+        assert!(colored.contains('\x1b'), "{colored}");
     }
 }

@@ -6,8 +6,7 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 pub(crate) fn is_valid_type_value(value: &str) -> bool {
-    // Accept every token the protocol parser understands (including the
-    // `HTTP:Elite`-style anonymity annotations) in any `+` combination.
+    // Accept protocol tokens with anonymity annotations in `+` combinations.
     value
         .split('+')
         .all(|part| !part.is_empty() && flx::Protocol::from_str(part).is_ok())
@@ -112,6 +111,9 @@ pub enum Command {
     Grab(FetchArgs),
     /// Validate proxies from a file or the built-in providers against online judges.
     Find(FindArgs),
+    /// Serve validated proxies through a local rotating endpoint (requires `--features serve`; experimental).
+    #[cfg(feature = "serve")]
+    Serve(ServeArgs),
     /// Download and verify the GeoLite2 GeoIP database.
     #[command(name = "geo-update")]
     GeoUpdate,
@@ -319,8 +321,7 @@ pub struct FetchArgs {
     pub output: OutputOptions,
 }
 
-/// Judge defaults joined once for clap's `default_value`, so the CLI and the
-/// library cannot drift apart.
+/// Share judge defaults between CLI and library.
 static HTTP_JUDGE_DEFAULTS: LazyLock<String> =
     LazyLock::new(|| flx::validator::DEFAULT_HTTP_JUDGE_URLS.join(","));
 static HTTPS_JUDGE_DEFAULTS: LazyLock<String> =
@@ -399,6 +400,71 @@ pub struct FindArgs {
 
     #[command(flatten)]
     pub validator: ValidatorArgs,
+}
+
+/// `flx serve`: expose validated proxies through a local rotating endpoint.
+/// Requires the `serve` Cargo feature; build with `--features serve`.
+#[cfg(feature = "serve")]
+#[derive(Args, Debug)]
+pub struct ServeArgs {
+    #[command(flatten)]
+    pub fetcher: FetcherArgs,
+
+    #[command(flatten)]
+    pub validator: ValidatorArgs,
+
+    /// Address for the rotating endpoint to bind.
+    #[arg(long, default_value = "127.0.0.1", help_heading = "Serve")]
+    pub bind: std::net::IpAddr,
+
+    /// Port for the rotating endpoint.
+    #[arg(
+        long,
+        default_value_t = flx::rotator::DEFAULT_PORT,
+        help_heading = "Serve"
+    )]
+    pub port: u16,
+
+    /// Rotation strategy for picking the upstream of each connection.
+    #[arg(
+        long,
+        value_parser(["round-robin", "random"]),
+        default_value = "round-robin",
+        help_heading = "Serve"
+    )]
+    pub strategy: String,
+
+    /// Maximum number of validated proxies kept in the rotation pool.
+    #[arg(
+        long,
+        default_value_t = flx::rotator::DEFAULT_POOL_SIZE,
+        help_heading = "Serve"
+    )]
+    pub pool_size: usize,
+
+    /// Validated proxies required before the endpoint starts serving.
+    #[arg(
+        long,
+        default_value_t = flx::rotator::DEFAULT_MIN_READY,
+        help_heading = "Serve"
+    )]
+    pub min_ready: usize,
+
+    /// Seconds between pool refill runs against the providers.
+    #[arg(long, help_heading = "Serve")]
+    pub refresh_secs: Option<u64>,
+
+    /// End-to-end budget per client connection, in seconds.
+    #[arg(long, help_heading = "Serve")]
+    pub request_timeout: Option<u64>,
+
+    /// Require `user:pass` basic proxy authentication from clients.
+    #[arg(long, help_heading = "Serve")]
+    pub auth: Option<String>,
+
+    /// Log a curl-like per-connection timeline to stderr.
+    #[arg(long, help_heading = "Serve")]
+    pub trace: bool,
 }
 
 /// `flx config`: manage the configuration file.

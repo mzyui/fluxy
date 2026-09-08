@@ -16,7 +16,7 @@ flx is a fast proxy scraper & validator written in Rust. It collects free proxie
 - **GeoIP** via GeoLite2 City + ASN, with a one-command database sync
 - **9 output formats** including JSON, CSV, PAC, and proxychains config
 - **Streaming-first pipeline** with backpressure, atomic parse cache, and graceful Ctrl+C finalization
-- **Proxy rotating server** — expose validated proxies through a local rotating endpoint *(under active development, not yet available)*
+- **Proxy rotating server** — expose validated proxies through a local rotating endpoint (`flx serve`, requires `--features serve`; experimental)
 
 ## Install
 
@@ -49,6 +49,26 @@ Validate proxies scraped from the providers, read from a file, or piped in from 
 flx find -l 5
 flx find -f proxies.txt
 cat list.txt | flx find -f -
+```
+
+## Serve (beta, optional)
+
+> Experimental and suboptimal for now: disabled by default. Build with
+> `cargo build --features serve` (library: `Flx::serve`, `ServeOptions`,
+> `Rotator*` only exist with the `serve` feature) to enable it. Release
+> binaries track the default build, so `serve` is hidden there until it
+> stabilizes. A `[serve]` config section is still parsed but ignored without
+> the feature.
+
+Expose the validated pool as a local rotating proxy: point any client at the endpoint and every connection is forwarded through a different working proxy. Start it like `find` — every validation flag (`-a`, `-c`, `-m`, `--timeout`, protocol types, ...) applies — and the endpoint keeps revalidating in the background, rotating round-robin (default) or randomly and dropping proxies that die. The endpoint goes live on the first validated proxy (tune with `--min-ready`) and the pool — capped at 25 — keeps refilling as proxies die or the providers yield more.
+
+```bash
+cargo build --features serve
+./target/debug/flx serve                  # 127.0.0.1:8080, round-robin
+flx serve --port 9000 --strategy random      # random rotation
+flx serve --refresh-secs 120                 # faster pool refill
+flx serve --min-ready 10                     # wait for 10 proxies before serving
+flx serve --auth user:pass                   # require basic proxy authentication
 ```
 
 ## Protocol types
@@ -154,7 +174,6 @@ cargo build                              # build library + binary
 cargo test                               # run the test suite (~283 tests)
 cargo clippy --all-targets --all-features
 cargo fmt
-cargo bench                              # criterion benchmarks (parsers, proxy)
 ```
 
 ## Contributing

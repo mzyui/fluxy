@@ -3,12 +3,14 @@ use std::io::IsTerminal as _;
 use std::sync::Arc;
 
 use flx::{DownloadProgress, ValidationProgress};
+#[cfg(feature = "serve")]
+use flx::RotatorPool;
 use tokio::sync::watch;
 
 #[cfg(feature = "progress_bar")]
 use super::progress;
 
-/// A hook that hides the progress UI around each stdout write.
+/// Hide progress UI around stdout writes.
 pub trait OutputGuard {
     fn before_write(&self);
     fn after_write(&self);
@@ -44,12 +46,7 @@ impl<B: OutputGuard> OutputGuard for OutputGuardEither<B> {
     }
 }
 
-/// Whether stdout is a pipe (FIFO) rather than a terminal or a regular file.
-///
-/// A piped stdout means a downstream process writes to the shared terminal (or
-/// `2>&1` routes our own stderr into the pipe), so a stderr summary would mix
-/// with that output. Regular-file redirects (`> out`) leave the terminal free
-/// and are safe to keep the summary.
+/// Detect piped stdout sharing the terminal.
 #[cfg(unix)]
 pub(crate) fn stdout_is_pipe() -> bool {
     use std::os::unix::io::AsRawFd as _;
@@ -111,7 +108,6 @@ pub fn make_warmup(
     None
 }
 
-// No-op warmup bar for builds without the `progress_bar` feature.
 #[cfg(not(feature = "progress_bar"))]
 pub struct WarmupBar;
 
@@ -119,7 +115,44 @@ pub struct WarmupBar;
 impl WarmupBar {
     pub fn set_phase(&self, _phase: &'static str) {}
 
+    pub fn set_progress(&self, _progress: ValidationProgress) {}
+
     pub fn refresh(&self) {}
+}
+
+#[cfg(all(feature = "serve", feature = "progress_bar"))]
+pub fn make_serve_bar(
+    pool: Arc<RotatorPool>,
+    min_ready: usize,
+    pool_size: usize,
+    endpoint: String,
+    quiet: bool,
+    no_color: bool,
+    download: &watch::Receiver<Option<DownloadProgress>>,
+) -> Option<Arc<progress::ServeBar>> {
+    progress::ServeBar::new(
+        pool,
+        min_ready,
+        pool_size,
+        endpoint,
+        quiet,
+        no_color,
+        download.clone(),
+    )
+    .map(Arc::new)
+}
+
+#[cfg(all(feature = "serve", not(feature = "progress_bar")))]
+pub fn make_serve_bar(
+    _pool: Arc<RotatorPool>,
+    _min_ready: usize,
+    _pool_size: usize,
+    _endpoint: String,
+    _quiet: bool,
+    _no_color: bool,
+    _download: &watch::Receiver<Option<DownloadProgress>>,
+) -> Option<Arc<WarmupBar>> {
+    None
 }
 
 #[cfg(not(feature = "progress_bar"))]
