@@ -580,8 +580,11 @@ impl GeoLookup {
         };
         if let Ok(Some(city)) = result.decode::<City>() {
             self.extract_country_data(&city, &mut geodata);
+            self.extract_continent_data(&city, &mut geodata);
             self.extract_region_data(&city, &mut geodata);
             self.extract_city_data(&city, &mut geodata);
+            self.extract_location_data(&city, &mut geodata);
+            self.extract_postal_data(&city, &mut geodata);
         }
         self.extract_ip_type(ip, &mut geodata);
         geodata
@@ -623,6 +626,21 @@ impl GeoLookup {
             geodata.region_iso_code = division.iso_code.map(Box::from);
             geodata.region_name = division.names.english.map(Box::from);
         }
+    }
+
+    fn extract_continent_data(&self, lookup: &City, geodata: &mut GeoData) {
+        geodata.continent_code = lookup.continent.code.map(Box::from);
+        geodata.continent_name = lookup.continent.names.english.map(Box::from);
+    }
+
+    fn extract_location_data(&self, lookup: &City, geodata: &mut GeoData) {
+        geodata.latitude = lookup.location.latitude;
+        geodata.longitude = lookup.location.longitude;
+        geodata.timezone = lookup.location.time_zone.map(Box::from);
+    }
+
+    fn extract_postal_data(&self, lookup: &City, geodata: &mut GeoData) {
+        geodata.zip = lookup.postal.code.map(Box::from);
     }
 
     fn extract_city_data(&self, lookup: &City, geodata: &mut GeoData) {

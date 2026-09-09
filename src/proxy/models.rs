@@ -493,6 +493,12 @@ mod tests {
             asn: Some(17995),
             aso: Some("PT Telekomunikasi Indonesia".into()),
             ip_type: crate::geolookup::IpType::Residential,
+            continent_code: Some("AS".into()),
+            continent_name: Some("Asia".into()),
+            latitude: Some(-6.2),
+            longitude: Some(106.8),
+            timezone: Some("Asia/Jakarta".into()),
+            zip: Some("10110".into()),
         });
 
         let json = proxy.as_json();
@@ -503,6 +509,10 @@ mod tests {
         assert_eq!(value["geo"]["asn"], 17995);
         assert_eq!(value["geo"]["aso"], "PT Telekomunikasi Indonesia");
         assert_eq!(value["geo"]["ip_type"], "residential");
+        assert_eq!(value["geo"]["continent_code"], "AS");
+        assert_eq!(value["geo"]["latitude"], -6.2);
+        assert_eq!(value["geo"]["timezone"], "Asia/Jakarta");
+        assert_eq!(value["geo"]["zip"], "10110");
     }
 
     #[test]

@@ -101,14 +101,13 @@ flx find --max-response-time 2 --min-response-time 0.1 --exclude-type SOCKS4
 flx find -s response-time --order desc --shuffle
 ```
 
-## GeoIP and IP type
+## GeoIP
 
-`-c` filters by country and `-g` annotates without filtering; `geo-update` refreshes the GeoLite2 database. Classify endpoints as residential, datacenter, or mobile.
+`-c` filters by country and `-g` annotates without filtering; `geo-update` refreshes the GeoLite2 databases. Every geo lookup also carries ASN data and classifies endpoints as residential, datacenter, or mobile.
 
 ```bash
 flx geo-update
 flx find -c US,DE --exclude-country RU,CN -l 5
-flx find --ip-type residential --with-ip-type
 ```
 
 ## Providers and cache
