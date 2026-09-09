@@ -25,6 +25,7 @@ const HOSTING_KEYWORDS: &[&str] = &[
     "azure",
     "microsoft",
     "google",
+    "ibm",
     "oracle",
     "digitalocean",
     "hetzner",
@@ -57,12 +58,11 @@ const HOSTING_KEYWORDS: &[&str] = &[
     "netcup",
     "incapsula",
     "hosting",
-    "colo",
+    "colocation",
     "datacenter",
     "data center",
     "dedicated server",
     "vps",
-    "cloud",
 ];
 
 const MOBILE_KEYWORDS: &[&str] = &[
@@ -78,7 +78,8 @@ const MOBILE_KEYWORDS: &[&str] = &[
     "at&t mobility",
     "movistar",
     "claro",
-    "oranj",
+    "orange",
+    "oranje",
     "etisalat",
     "airtel",
     "mtn",
@@ -216,5 +217,37 @@ mod tests {
     #[test]
     fn binary_search_requires_sorted_asns() {
         assert!(super::HOSTING_ASNS.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn orange_spellings_are_mobile() {
+        use super::has_mobile_keyword;
+        assert!(has_mobile_keyword("Orange France"));
+        assert!(has_mobile_keyword("ORANGE"));
+        assert!(has_mobile_keyword("Oranje Nederland"));
+        assert_eq!(
+            IpType::classify(None, Some("Orange Cameroon"), None, None),
+            IpType::Mobile
+        );
+    }
+
+    #[test]
+    fn generic_substrings_do_not_false_positive() {
+        use super::{has_hosting_keyword, has_mobile_keyword};
+        assert!(!has_hosting_keyword("Cloud9 Networks"));
+        assert!(!has_hosting_keyword("Colosseum Inc"));
+        assert!(!has_mobile_keyword("Azteca DEploy"));
+        assert_eq!(
+            IpType::classify(Some(1234), Some("Cloud9 Networks"), None, None),
+            IpType::Residential
+        );
+    }
+
+    #[test]
+    fn precise_generic_keywords_still_match() {
+        use super::has_hosting_keyword;
+        assert!(has_hosting_keyword("IBM Cloud"));
+        assert!(has_hosting_keyword("Colocation America"));
+        assert!(has_hosting_keyword("Hetzner Cloud"));
     }
 }
