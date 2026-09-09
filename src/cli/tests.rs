@@ -772,7 +772,11 @@ fn skipped_fallback_after_partial_pass_closes_the_open_array() {
     let parsed: serde_json::Value =
         serde_json::from_str(&content).expect("a single closed document");
     assert_eq!(parsed.as_array().map(Vec::len), Some(2));
-    assert_eq!(content.matches('[').count(), 1, "exactly one array opener");
+    assert_eq!(
+        content.matches("[\n").count(),
+        1,
+        "exactly one document-level array opener (`type` arrays stay on one line)"
+    );
 }
 
 #[test]
@@ -969,8 +973,11 @@ fn json_lines_one_proxy_produces_one_line() {
     let out = run_json_lines(&[sample_proxy(1)], 0);
     let parsed = parse_json_lines(&out);
     assert_eq!(parsed.len(), 1);
-    assert!(!out.contains('['));
-    assert!(!out.contains(']'));
+    assert!(
+        !out.lines()
+            .any(|line| line.starts_with('[') || line.starts_with(']')),
+        "no document-level array; nested `type` arrays are fine"
+    );
 }
 
 #[test]
@@ -1201,8 +1208,8 @@ fn process_result_sorts_by_anonymity_rank() {
         validated_proxy(3, "HTTP:Elite", 0.2),
     ];
     let asc = run_sorted(&proxies, "anonymity", "asc");
-    assert!(asc[0]["type"]["protocol"]["Http"].as_str().unwrap() == "Transparent");
-    assert!(asc[2]["type"]["protocol"]["Http"].as_str().unwrap() == "Elite");
+    assert!(asc[0]["type"][0]["protocol"]["Http"].as_str().unwrap() == "Transparent");
+    assert!(asc[2]["type"][0]["protocol"]["Http"].as_str().unwrap() == "Elite");
 }
 
 #[test]

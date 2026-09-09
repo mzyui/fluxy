@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Serialize, Serializer};
+use serde::Serialize;
 
 use crate::{error::ProtocolParseError, error::ProxyParseError, geolookup::models::GeoData};
 
@@ -152,22 +152,6 @@ impl ProxyType {
     }
 }
 
-// Serialize borrowed type key inside manual Proxy serializer.
-struct TypesRef<'a>(&'a [ProxyType]);
-
-impl serde::Serialize for TypesRef<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self.0 {
-            [] => serializer.serialize_none(),
-            [single] => single.serialize(serializer),
-            many => many.serialize(serializer),
-        }
-    }
-}
-
 /// Represent validated proxy endpoint with metadata.
 #[derive(Debug, Clone)]
 pub struct Proxy {
@@ -195,7 +179,7 @@ impl serde::Serialize for Proxy {
         state.serialize_field("min_response_time", &self.runtimes.min)?;
         state.serialize_field("max_response_time", &self.runtimes.max)?;
         state.serialize_field("response_time_samples", &self.runtimes.count)?;
-        state.serialize_field("type", &TypesRef(&self.proxy_types))?;
+        state.serialize_field("type", &self.proxy_types)?;
         state.end()
     }
 }
@@ -412,12 +396,20 @@ mod tests {
         assert_eq!(value["min_response_time"], serde_json::json!(0.2));
         assert_eq!(value["max_response_time"], serde_json::json!(0.8));
         assert_eq!(value["response_time_samples"], serde_json::json!(2));
-        // Historical shape is untouched for existing consumers.
-        assert!(value["type"].is_null());
+        // `type` is always an array, even when empty.
+        assert_eq!(value["type"], serde_json::json!([]));
         assert_eq!(value["ip"], serde_json::json!("192.0.2.50"));
         assert_eq!(value["port"], serde_json::json!(8080));
         assert!(proxy.min_response_time() > 0.0);
         assert_eq!(proxy.sample_count(), 2);
+    }
+
+    #[test]
+    fn proxy_without_geo_lookup_serializes_empty_geo_object() {
+        // `Proxy::new` carries the shared default geo (no lookup ran).
+        let proxy = Proxy::new(Ipv4Addr::new(192, 0, 2, 60), 8080);
+        let value: serde_json::Value = serde_json::from_str(&proxy.as_json()).unwrap();
+        assert_eq!(value["geo"], serde_json::json!({}));
     }
 
     #[test]
@@ -439,15 +431,18 @@ mod tests {
     }
 
     #[test]
-    fn single_type_proxy_keeps_object_json_shape() {
+    fn single_type_proxy_serializes_as_single_element_array() {
         let mut proxy = Proxy::new(Ipv4Addr::new(192, 0, 2, 41), 8080);
         proxy
             .proxy_types
             .push(ProxyType::checked(Protocol::Http(Anonymity::Transparent)));
 
         let value: serde_json::Value = serde_json::from_str(&proxy.as_json()).unwrap();
-        assert!(value["type"].is_object());
-        assert_eq!(value["type"]["protocol"]["Http"], "Transparent");
+        let types = value["type"]
+            .as_array()
+            .expect("single type serializes as array");
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0]["protocol"]["Http"], "Transparent");
     }
 
     #[test]
