@@ -8,7 +8,7 @@ use clap::{CommandFactory, FromArgMatches};
 use flx::initialize_logging;
 use flx::{
     proxy::models::{Anonymity, Protocol, Proxy},
-    FetchStage, IpType, PauseGate, ProxySource, ProxyValidator, ValidationProgress,
+    FetchStage, PauseGate, ProxySource, ProxyValidator, ValidationProgress,
 };
 use futures_util::{Stream, StreamExt};
 use std::io::Write as _;
@@ -287,22 +287,11 @@ fn needs_missed_probe(proxy: &Proxy, requested: &[Protocol]) -> bool {
 }
 
 fn fetcher_config(options: &FetcherArgs) -> flx::fetcher::Config {
-    let ip_type = options.ip_type.as_deref().map(|name| match name {
-        "residential" => IpType::Residential,
-        "datacenter" => IpType::Datacenter,
-        "mobile" => IpType::Mobile,
-        "unknown" => IpType::Unknown,
-        _ => IpType::Unknown,
-    });
     flx::fetcher::Config {
         concurrency_limit: options.fetch_concurrency,
         enable_geo_lookup: options.with_geo
             || !options.countries.is_empty()
-            || !options.exclude_country.is_empty()
-            || options.with_ip_type
-            || options.ip_type.is_some(),
-        enable_ip_type: options.with_ip_type || options.ip_type.is_some(),
-        ip_type_filter: ip_type,
+            || !options.exclude_country.is_empty(),
         countries: Arc::from(options.countries.as_slice()),
         excluded_countries: Arc::from(options.exclude_country.as_slice()),
         cache_ttl: (options.cache_ttl > 0)

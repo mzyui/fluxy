@@ -87,7 +87,7 @@ Every knob on the `Flx` builder, grouped:
 |---|---|
 | Source | `fetch`, `from_file(s)`, `providers`, `exclude_providers`, `source_urls`, `offline`, `cache_ttl`, `refresh_cache`, `fetch_concurrency`, `fetch_delay`, `provider_timeout`, `fallback_threshold`, `fetch_phase_timeout` |
 | Validation | `types`, `groups`, `validate_http`, `no_validate`, `concurrency`, `timeout`, `max_attempts`, `retry_delay`, `http_judges`, `https_judges`, `insecure`, `support_cookies`, `support_referer`, `probe_missed_types`, `report_failures` |
-| GeoIP | `with_geo`, `with_ip_type`, `ip_type`, `countries` |
+| GeoIP | `with_geo`, `countries` |
 | Output | `limit` |
 | Terminal | `stream`, `stream_with_progress`, `collect` |
 

@@ -1,13 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::geolookup::IpType;
-
 pub struct Config {
     pub enforce_unique_ip: bool,
     pub concurrency_limit: usize,
     pub enable_geo_lookup: bool,
-    pub enable_ip_type: bool,
-    pub ip_type_filter: Option<IpType>,
     pub countries: Arc<[String]>,
     pub excluded_countries: Arc<[String]>,
     pub fallback_threshold: Option<usize>,
@@ -50,8 +46,6 @@ impl Default for Config {
             enforce_unique_ip: true,
             concurrency_limit: DEFAULT_CONCURRENCY_LIMIT,
             enable_geo_lookup: false,
-            enable_ip_type: false,
-            ip_type_filter: None,
             countries: Arc::from(Vec::new()),
             excluded_countries: Arc::from(Vec::new()),
             fallback_threshold: None,
@@ -78,8 +72,6 @@ mod tests {
     #[test]
     fn geo_lookup_is_disabled_by_default() {
         assert!(!Config::default().enable_geo_lookup);
-        assert!(!Config::default().enable_ip_type);
-        assert_eq!(Config::default().ip_type_filter, None);
     }
 
     #[test]

@@ -538,11 +538,13 @@ async fn ensure_database(
 
 pub struct GeoLookup {
     reader: Reader<Vec<u8>>,
-    asn_reader: Option<Reader<Vec<u8>>>,
+    asn_reader: Reader<Vec<u8>>,
 }
 
 impl GeoLookup {
-    pub async fn new(need_asn: bool) -> anyhow::Result<Self> {
+    /// Opens the GeoLite2 City and ASN databases, downloading them on first
+    /// use, so every lookup carries country/city/ASN data.
+    pub async fn new() -> anyhow::Result<Self> {
         let mmdb_path = database_path()?;
 
         let _download_guard = download_lock().lock().await;
@@ -552,18 +554,12 @@ impl GeoLookup {
             "the GeoLite2 city database",
         )
         .await?;
-        let asn_reader = if need_asn {
-            Some(
-                ensure_database(
-                    &asn_database_path()?,
-                    GEOLITE_ASN_ENDPOINT_URL,
-                    "the GeoLite2 ASN database",
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
+        let asn_reader = ensure_database(
+            &asn_database_path()?,
+            GEOLITE_ASN_ENDPOINT_URL,
+            "the GeoLite2 ASN database",
+        )
+        .await?;
 
         Ok(Self { reader, asn_reader })
     }
@@ -591,13 +587,13 @@ impl GeoLookup {
     }
 
     fn extract_ip_type(&self, ip: &Ipv4Addr, geodata: &mut GeoData) {
-        let (asn, aso) = match self.asn_reader.as_ref().and_then(|reader| {
-            reader
-                .lookup(std::net::IpAddr::V4(*ip))
-                .ok()
-                .and_then(|result| result.decode::<Asn>().ok())
-                .flatten()
-        }) {
+        let (asn, aso) = match self
+            .asn_reader
+            .lookup(std::net::IpAddr::V4(*ip))
+            .ok()
+            .and_then(|result| result.decode::<Asn>().ok())
+            .flatten()
+        {
             Some(record) => (
                 record.autonomous_system_number,
                 record.autonomous_system_organization,

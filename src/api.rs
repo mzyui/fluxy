@@ -240,21 +240,6 @@ impl Flx {
         self
     }
 
-    /// Enables IP class annotation.
-    pub fn with_ip_type(mut self) -> Self {
-        self.fetcher_config.enable_geo_lookup = true;
-        self.fetcher_config.enable_ip_type = true;
-        self
-    }
-
-    /// Filters fetched proxies by IP class.
-    pub fn ip_type(mut self, ip_type: crate::geolookup::IpType) -> Self {
-        self.fetcher_config.enable_geo_lookup = true;
-        self.fetcher_config.enable_ip_type = true;
-        self.fetcher_config.ip_type_filter = Some(ip_type);
-        self
-    }
-
     /// Filters fetched proxies by ISO country code.
     pub fn countries(mut self, countries: impl Into<Vec<String>>) -> Self {
         self.fetcher_config.enable_geo_lookup = true;
@@ -673,25 +658,6 @@ mod tests {
         let flx = flx.support_cookies().support_referer();
         assert!(flx.validator_config.support_cookies);
         assert!(flx.validator_config.support_referer);
-    }
-
-    #[test]
-    fn with_ip_type_enables_lookup_and_detection() {
-        let flx = Flx::fetch().with_ip_type();
-        assert!(flx.fetcher_config.enable_geo_lookup);
-        assert!(flx.fetcher_config.enable_ip_type);
-        assert_eq!(flx.fetcher_config.ip_type_filter, None);
-    }
-
-    #[test]
-    fn ip_type_filter_implies_lookup_and_detection() {
-        let flx = Flx::fetch().ip_type(crate::geolookup::IpType::Residential);
-        assert!(flx.fetcher_config.enable_geo_lookup);
-        assert!(flx.fetcher_config.enable_ip_type);
-        assert_eq!(
-            flx.fetcher_config.ip_type_filter,
-            Some(crate::geolookup::IpType::Residential)
-        );
     }
 
     #[test]

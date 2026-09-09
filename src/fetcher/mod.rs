@@ -36,7 +36,7 @@ use tokio::{
 };
 
 use crate::{
-    geolookup::{GeoLookup, IpType},
+    geolookup::GeoLookup,
     providers::{all_providers, select_providers, CustomUrlProvider, ProviderTier},
     proxy::models::Proxy,
 };
@@ -58,7 +58,6 @@ pub struct ProxyFetcher {
     geolookup: Option<GeoLookup>,
     countries: HashSet<String>,
     excluded_countries: HashSet<String>,
-    ip_type_filter: Option<IpType>,
     unique_ips: DedupTable,
     coordinator: JoinHandle<()>,
     config: Config,
@@ -79,8 +78,8 @@ impl ProxyFetcher {
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid configs (zero concurrency, country or
-    /// IP-type filter without GeoIP) or GeoIP init failures.
+    /// Returns an error for invalid configs (zero concurrency or country
+    /// filter without GeoIP) or GeoIP init failures.
     pub async fn gather(config: Config) -> anyhow::Result<Self> {
         if config.concurrency_limit == 0 {
             anyhow::bail!("config.concurrency_limit must be greater than zero");
@@ -93,15 +92,10 @@ impl ProxyFetcher {
                 "country filter requires enable_geo_lookup=true (GeoIP lookup is currently disabled)"
             );
         }
-        if (config.enable_ip_type || config.ip_type_filter.is_some()) && !config.enable_geo_lookup {
-            anyhow::bail!(
-                "ip-type detection requires enable_geo_lookup=true (GeoIP lookup is currently disabled)"
-            );
-        }
         let (sender, receiver) = mpsc::channel(FETCH_CHANNEL_CAPACITY);
         let geolookup = if config.enable_geo_lookup {
             Some(
-                GeoLookup::new(config.enable_ip_type || config.ip_type_filter.is_some())
+                GeoLookup::new()
                     .await
                     .context("failed to initialize geo lookup")?,
             )
@@ -324,7 +318,6 @@ impl ProxyFetcher {
             geolookup,
             countries,
             excluded_countries,
-            ip_type_filter: config.ip_type_filter,
             config,
             accepted,
             drain_notify,
@@ -407,7 +400,6 @@ impl ProxyFetcher {
             enforce_unique_ip: self.config.enforce_unique_ip,
             countries: &self.countries,
             excluded_countries: &self.excluded_countries,
-            ip_type_filter: self.ip_type_filter.as_ref(),
             counter: &mut self.counter,
             accepted: &self.accepted,
         };
@@ -448,7 +440,6 @@ struct AcceptContext<'a> {
     enforce_unique_ip: bool,
     countries: &'a HashSet<String>,
     excluded_countries: &'a HashSet<String>,
-    ip_type_filter: Option<&'a IpType>,
     counter: &'a mut usize,
     accepted: &'a AtomicUsize,
 }
@@ -487,12 +478,6 @@ where
                 .map(|code| ctx.excluded_countries.contains(code.as_ref()))
                 .unwrap_or(false)
         {
-            return None;
-        }
-    }
-
-    if let Some(want) = ctx.ip_type_filter {
-        if proxy.geo.ip_type != *want {
             return None;
         }
     }
@@ -630,7 +615,6 @@ mod tests {
                 enforce_unique_ip: config.enforce_unique_ip,
                 countries: &countries,
                 excluded_countries: &excluded_countries,
-                ip_type_filter: None,
                 counter: &mut counter,
                 accepted: &accepted,
             },
@@ -647,7 +631,6 @@ mod tests {
                 enforce_unique_ip: config.enforce_unique_ip,
                 countries: &countries,
                 excluded_countries: &excluded_countries,
-                ip_type_filter: None,
                 counter: &mut counter,
                 accepted: &accepted,
             },
@@ -678,7 +661,6 @@ mod tests {
             enforce_unique_ip: true,
             countries: &countries,
             excluded_countries: &excluded_countries,
-            ip_type_filter: None,
             counter: &mut counter,
             accepted: &accepted,
         };
@@ -748,7 +730,6 @@ mod tests {
                 enforce_unique_ip: true,
                 countries: &countries,
                 excluded_countries: &excluded_countries,
-                ip_type_filter: None,
                 counter: &mut counter,
                 accepted: &accepted,
             },
@@ -782,7 +763,6 @@ mod tests {
             enforce_unique_ip: true,
             countries: &countries,
             excluded_countries: &excluded_countries,
-            ip_type_filter: None,
             counter: &mut counter,
             accepted: &accepted,
         };
@@ -802,43 +782,6 @@ mod tests {
         assert!(rejected.is_none());
         assert!(kept.is_some());
         assert_eq!(counter, 1);
-    }
-
-    #[test]
-    fn ip_type_filter_keeps_only_matching_proxies() {
-        let mut unique_ips = DedupTable::new();
-        let countries = hashbrown::HashSet::new();
-        let excluded_countries = hashbrown::HashSet::new();
-        let mut counter = 0;
-        let accepted = AtomicUsize::new(0);
-        let residential = Proxy::new(Ipv4Addr::new(192, 0, 2, 3), 8080);
-        let datacenter = Proxy::new(Ipv4Addr::new(192, 0, 2, 4), 8081);
-        let want = crate::geolookup::IpType::Residential;
-
-        let mut ctx = AcceptContext {
-            unique_ips: &mut unique_ips,
-            enforce_unique_ip: true,
-            countries: &countries,
-            excluded_countries: &excluded_countries,
-            ip_type_filter: Some(&want),
-            counter: &mut counter,
-            accepted: &accepted,
-        };
-        let accepted_home = accept_proxy(&mut ctx, residential, |_| {
-            Some(GeoData {
-                ip_type: crate::geolookup::IpType::Residential,
-                ..GeoData::default()
-            })
-        });
-        let rejected_datacenter = accept_proxy(&mut ctx, datacenter, |_| {
-            Some(GeoData {
-                ip_type: crate::geolookup::IpType::Datacenter,
-                ..GeoData::default()
-            })
-        });
-
-        assert!(accepted_home.is_some());
-        assert!(rejected_datacenter.is_none());
     }
 
     #[tokio::test]

@@ -57,29 +57,6 @@ fn with_geo_enables_geo_lookup_without_country_filter() {
 }
 
 #[test]
-fn with_ip_type_enables_detection_without_filter() {
-    let ip_type_only = fetch_from(&["--with-ip-type"]);
-    let config = fetcher_config(&ip_type_only.fetcher);
-    assert!(config.enable_geo_lookup);
-    assert!(config.enable_ip_type);
-    assert_eq!(config.ip_type_filter, None);
-}
-
-#[test]
-fn ip_type_filter_parses_and_implies_detection() {
-    let filtered = fetch_from(&["--ip-type", "residential"]);
-    let config = fetcher_config(&filtered.fetcher);
-    assert!(config.enable_geo_lookup);
-    assert!(config.enable_ip_type);
-    assert_eq!(config.ip_type_filter, Some(flx::IpType::Residential));
-}
-
-#[test]
-fn invalid_ip_type_value_is_rejected() {
-    assert!(Cli::try_parse_from(["flx", "find", "--ip-type", "bogus"]).is_err());
-}
-
-#[test]
 fn cache_ttl_maps_to_minutes_and_zero_disables() {
     let enabled = fetch_from(&["--cache-ttl", "10"]);
     assert_eq!(

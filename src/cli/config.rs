@@ -20,8 +20,6 @@ pub struct FetchSection {
     pub exclude_providers: Option<Vec<String>>,
     pub source_urls: Option<Vec<String>>,
     pub with_geo: Option<bool>,
-    pub with_ip_type: Option<bool>,
-    pub ip_type: Option<String>,
     pub countries: Option<Vec<String>>,
     pub exclude_countries: Option<Vec<String>>,
     pub concurrency: Option<usize>,
@@ -180,7 +178,6 @@ fn deser_section<T: serde::de::DeserializeOwned>(
 }
 
 const LOG_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
-const IP_TYPES: &[&str] = &["residential", "datacenter", "mobile", "unknown"];
 const SERVE_STRATEGIES: &[&str] = &["round-robin", "random"];
 pub(crate) const FORMATS: &[&str] = &[
     "default",
@@ -200,9 +197,6 @@ pub(crate) const ANONYMITY_LEVELS: &[&str] = &["transparent", "anonymous", "elit
 fn validate_enum_values(cfg: &FileConfig) -> Result<(), ConfigError> {
     if let Some(g) = &cfg.global {
         ensure_member(g.log_level.as_deref(), LOG_LEVELS, "global.log_level")?;
-    }
-    if let Some(f) = &cfg.fetch {
-        ensure_member(f.ip_type.as_deref(), IP_TYPES, "fetch.ip_type")?;
     }
     if let Some(o) = &cfg.output {
         ensure_member(o.format.as_deref(), FORMATS, "output.format")?;
@@ -298,8 +292,6 @@ overlay_section!(FetchSection {
     exclude_providers,
     source_urls,
     with_geo,
-    with_ip_type,
-    ip_type,
     countries,
     exclude_countries,
     concurrency,
@@ -523,13 +515,6 @@ fn apply_fetch(cli: &mut FetcherArgs, cfg: Option<&FetchSection>, sub: Option<&A
         cli.with_geo,
         |v| v
     );
-    apply_field!(
-        provided(sub, "with_ip_type"),
-        &cfg.with_ip_type,
-        cli.with_ip_type,
-        |v| v
-    );
-    apply_field!(provided(sub, "ip_type"), &cfg.ip_type, cli.ip_type, Some);
     apply_field!(
         provided(sub, "provider"),
         &cfg.providers,
@@ -760,8 +745,6 @@ pub fn template() -> &'static str {
 # exclude_providers = ["github-raw"]       # --exclude-provider
 # source_urls = ["https://example.com/proxies.txt"]  # --source-url
 # with_geo = true
-# with_ip_type = true
-# ip_type = "residential"                  # residential|datacenter|mobile|unknown
 # countries = ["US", "DE"]                 # --countries
 # exclude_countries = ["RU", "CN"]         # --exclude-country
 # concurrency = 25                         # --fetch-concurrency
@@ -962,7 +945,6 @@ http_judges = ["http://azenv.net/"]
             "[output]\norder = \"sideways\"\n",
             "[output]\nmin_anonymity = \"super\"\n",
             "[output]\nlevels = [\"elite\", \"super\"]\n",
-            "[fetch]\nip_type = \"nope\"\n",
             "[global]\nlog_level = \"chatty\"\n",
         ] {
             assert!(parse(bad).is_err(), "must reject: {bad}");
