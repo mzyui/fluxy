@@ -490,6 +490,8 @@ mod tests {
             region_iso_code: None,
             region_name: None,
             city_name: None,
+            asn: Some(17995),
+            aso: Some("PT Telekomunikasi Indonesia".into()),
             ip_type: crate::geolookup::IpType::Residential,
         });
 
@@ -498,6 +500,8 @@ mod tests {
 
         assert_eq!(value["geo"]["iso_code"], "ID");
         assert_eq!(value["geo"]["name"], "Indonesia");
+        assert_eq!(value["geo"]["asn"], 17995);
+        assert_eq!(value["geo"]["aso"], "PT Telekomunikasi Indonesia");
         assert_eq!(value["geo"]["ip_type"], "residential");
     }
 

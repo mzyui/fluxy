@@ -601,6 +601,8 @@ impl GeoLookup {
             ),
             None => (None, None),
         };
+        geodata.asn = asn;
+        geodata.aso = aso.map(Box::from);
         geodata.ip_type = IpType::classify(asn, aso, None, None);
     }
 

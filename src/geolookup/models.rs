@@ -9,5 +9,7 @@ pub struct GeoData {
     pub region_iso_code: Option<Box<str>>,
     pub region_name: Option<Box<str>>,
     pub city_name: Option<Box<str>>,
+    pub asn: Option<u32>,
+    pub aso: Option<Box<str>>,
     pub ip_type: IpType,
 }

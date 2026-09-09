@@ -379,7 +379,7 @@ where
 
     // Emit the CSV header once even for empty streams.
     if _csv && finalize.emit_csv_header && !appending_to_existing {
-        buf.extend_from_slice(b"ip,port,type,response_time,country,ip_type\n");
+        buf.extend_from_slice(b"ip,port,type,response_time,country,ip_type,asn,aso\n");
         if let Some(ref mut file) = output_file {
             if let Err(error) = file.write_all(&buf).await {
                 write_error = Some(
@@ -647,6 +647,12 @@ fn write_csv_row(buf: &mut Vec<u8>, proxy: &Proxy) {
     csv_quote(buf, proxy.geo.iso_code.as_deref().unwrap_or(""));
     buf.push(b',');
     csv_quote(buf, ip_type_str(proxy));
+    buf.push(b',');
+    if let Some(asn) = proxy.geo.asn {
+        let _ = write!(buf, "{asn}");
+    }
+    buf.push(b',');
+    csv_quote(buf, proxy.geo.aso.as_deref().unwrap_or(""));
     buf.push(b'\n');
 }
 
