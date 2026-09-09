@@ -61,13 +61,55 @@ impl Anonymity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
     Http(Anonymity),
     Https(Anonymity),
     Socks4,
     Socks5,
     Connect(u16),
+}
+
+// Serialize every variant as an object so consumers never branch on
+// string-vs-object: Http/Https carry anonymity, Connect carries port,
+// SOCKS carries family only.
+impl Serialize for Protocol {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct as _;
+        match self {
+            Self::Http(anonymity) => {
+                let mut state = serializer.serialize_struct("Protocol", 2)?;
+                state.serialize_field("family", "Http")?;
+                state.serialize_field("anonymity", anonymity)?;
+                state.end()
+            }
+            Self::Https(anonymity) => {
+                let mut state = serializer.serialize_struct("Protocol", 2)?;
+                state.serialize_field("family", "Https")?;
+                state.serialize_field("anonymity", anonymity)?;
+                state.end()
+            }
+            Self::Socks4 => {
+                let mut state = serializer.serialize_struct("Protocol", 1)?;
+                state.serialize_field("family", "Socks4")?;
+                state.end()
+            }
+            Self::Socks5 => {
+                let mut state = serializer.serialize_struct("Protocol", 1)?;
+                state.serialize_field("family", "Socks5")?;
+                state.end()
+            }
+            Self::Connect(port) => {
+                let mut state = serializer.serialize_struct("Protocol", 2)?;
+                state.serialize_field("family", "Connect")?;
+                state.serialize_field("port", port)?;
+                state.end()
+            }
+        }
+    }
 }
 
 impl Display for Protocol {
@@ -426,8 +468,8 @@ mod tests {
             .as_array()
             .expect("multi-type serializes as array");
         assert_eq!(types.len(), 2);
-        assert_eq!(types[0]["protocol"], "Socks4");
-        assert_eq!(types[1]["protocol"], "Socks5");
+        assert_eq!(types[0]["protocol"]["family"], "Socks4");
+        assert_eq!(types[1]["protocol"]["family"], "Socks5");
     }
 
     #[test]
@@ -442,7 +484,26 @@ mod tests {
             .as_array()
             .expect("single type serializes as array");
         assert_eq!(types.len(), 1);
-        assert_eq!(types[0]["protocol"]["Http"], "Transparent");
+        assert_eq!(types[0]["protocol"]["family"], "Http");
+        assert_eq!(types[0]["protocol"]["anonymity"], "Transparent");
+    }
+
+    #[test]
+    fn every_protocol_family_serializes_as_object() {
+        let cases = [
+            (
+                Protocol::Https(Anonymity::Elite),
+                serde_json::json!({"family": "Https", "anonymity": "Elite"}),
+            ),
+            (Protocol::Socks5, serde_json::json!({"family": "Socks5"})),
+            (
+                Protocol::Connect(80),
+                serde_json::json!({"family": "Connect", "port": 80}),
+            ),
+        ];
+        for (protocol, expected) in cases {
+            assert_eq!(serde_json::to_value(protocol).unwrap(), expected);
+        }
     }
 
     #[test]

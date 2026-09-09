@@ -1208,8 +1208,10 @@ fn process_result_sorts_by_anonymity_rank() {
         validated_proxy(3, "HTTP:Elite", 0.2),
     ];
     let asc = run_sorted(&proxies, "anonymity", "asc");
-    assert!(asc[0]["type"][0]["protocol"]["Http"].as_str().unwrap() == "Transparent");
-    assert!(asc[2]["type"][0]["protocol"]["Http"].as_str().unwrap() == "Elite");
+    assert!(asc[0]["type"][0]["protocol"]["family"].as_str().unwrap() == "Http");
+    assert!(asc[0]["type"][0]["protocol"]["anonymity"].as_str().unwrap() == "Transparent");
+    assert!(asc[2]["type"][0]["protocol"]["family"].as_str().unwrap() == "Http");
+    assert!(asc[2]["type"][0]["protocol"]["anonymity"].as_str().unwrap() == "Elite");
 }
 
 #[test]
