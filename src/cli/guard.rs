@@ -2,9 +2,9 @@
 use std::io::IsTerminal as _;
 use std::sync::Arc;
 
-use flx::{DownloadProgress, ValidationProgress};
 #[cfg(feature = "serve")]
 use flx::RotatorPool;
+use flx::{DownloadProgress, ValidationProgress};
 use tokio::sync::watch;
 
 #[cfg(feature = "progress_bar")]
@@ -73,8 +73,31 @@ pub fn make_guard(
     }
 }
 
+#[cfg(feature = "progress_bar")]
+pub fn make_guard_with_label(
+    progress: ValidationProgress,
+    quiet: bool,
+    no_color: bool,
+    label: &'static str,
+) -> OutputGuardEither<progress::ValidationBar> {
+    match progress::ValidationBar::with_label(progress, quiet, no_color, stdout_is_pipe(), label) {
+        Some(bar) => OutputGuardEither::Bar(bar),
+        None => OutputGuardEither::Noop(NoopGuard),
+    }
+}
+
 #[cfg(not(feature = "progress_bar"))]
 pub fn make_guard(_progress: ValidationProgress, _quiet: bool, _no_color: bool) -> NoopGuard {
+    NoopGuard
+}
+
+#[cfg(not(feature = "progress_bar"))]
+pub fn make_guard_with_label(
+    _progress: ValidationProgress,
+    _quiet: bool,
+    _no_color: bool,
+    _label: &'static str,
+) -> NoopGuard {
     NoopGuard
 }
 

@@ -1012,7 +1012,10 @@ fn csv_one_proxy_produces_header_and_one_row() {
     let out = run_csv(&[sample_proxy(1)], 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0], "ip,port,type,response_time,country,ip_type,asn,aso");
+    assert_eq!(
+        lines[0],
+        "ip,port,type,response_time,country,ip_type,asn,aso"
+    );
     assert!(lines[1].starts_with("192.168.0.1,8081,"));
     assert!(lines[1].ends_with(",unknown,,"));
 }
@@ -1039,7 +1042,10 @@ fn csv_multiple_proxies_produce_one_row_each() {
     let out = run_csv(&proxies, 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 4, "header + 3 rows");
-    assert_eq!(lines[0], "ip,port,type,response_time,country,ip_type,asn,aso");
+    assert_eq!(
+        lines[0],
+        "ip,port,type,response_time,country,ip_type,asn,aso"
+    );
     assert!(lines[1].contains("192.168.0.1"));
     assert!(lines[2].contains("192.168.0.2"));
     assert!(lines[3].contains("192.168.0.3"));

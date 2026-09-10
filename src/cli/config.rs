@@ -414,9 +414,9 @@ fn warn_unknown_sections(cfg: &FileConfig) {
     }
 }
 
-use crate::argument::{Cli, Command, FetcherArgs, OutputOptions, ValidatorArgs};
 #[cfg(feature = "serve")]
 use crate::argument::ServeArgs;
+use crate::argument::{Cli, Command, FetcherArgs, OutputOptions, ValidatorArgs};
 use clap::parser::ValueSource;
 use clap::ArgMatches;
 

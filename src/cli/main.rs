@@ -1,8 +1,8 @@
 use anyhow::Context;
 use argument::Cli;
-use argument::{Command, ConfigAction, ConfigCmd, FetchArgs, FetcherArgs, FindArgs, ValidatorArgs};
 #[cfg(feature = "serve")]
 use argument::ServeArgs;
+use argument::{Command, ConfigAction, ConfigCmd, FetchArgs, FetcherArgs, FindArgs, ValidatorArgs};
 use clap::{CommandFactory, FromArgMatches};
 #[cfg(feature = "log")]
 use flx::initialize_logging;
@@ -1169,7 +1169,7 @@ async fn run_find(
             }
         }
         let progress2 = pass2.progress();
-        let guard2 = make_guard(progress2.clone(), quiet, no_color);
+        let guard2 = make_guard_with_label(progress2.clone(), quiet, no_color, "Validating pass 2");
         let outcome2 = process_result(
             pass2,
             options2,
@@ -1329,10 +1329,11 @@ fn report_validation_summary(
     if quiet || stdout_is_pipe() {
         return;
     }
+    // Same semantics as the live bars: completed probes per second.
     let rate = if stats.elapsed.is_zero() {
         0.0
     } else {
-        stats.total as f64 / stats.elapsed.as_secs_f64()
+        stats.done as f64 / stats.elapsed.as_secs_f64()
     };
     let mut report = format_validation_stats(&stats, rate, dst);
     if let Some(dist) = dist {

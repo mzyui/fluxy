@@ -11,9 +11,9 @@ use std::{
 
 use crate::status_line::{Options as StatusLineOptions, StatusLine};
 use crate::style::Colorize;
-use flx::{DownloadProgress, ValidationProgress};
 #[cfg(feature = "serve")]
 use flx::RotatorPool;
+use flx::{DownloadProgress, ValidationProgress};
 use tokio::sync::watch;
 
 use crate::OutputGuard;
@@ -174,18 +174,93 @@ fn fit_terminal(line: String, color: bool, width: Option<usize>) -> String {
     out
 }
 
+/// Shared rate: count per second, 0 when no time has passed.
+fn rate_per_sec(count: usize, elapsed_secs: f64) -> f64 {
+    if elapsed_secs > 0.0 {
+        count as f64 / elapsed_secs
+    } else {
+        0.0
+    }
+}
+
+/// Human throughput for download bars.
+fn format_throughput(bytes_per_sec: f64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    const KB: f64 = 1024.0;
+    if bytes_per_sec >= MB {
+        format!("{:.1} MB/s", bytes_per_sec / MB)
+    } else if bytes_per_sec >= KB {
+        format!("{:.1} KB/s", bytes_per_sec / KB)
+    } else {
+        format!("{bytes_per_sec:.0} B/s")
+    }
+}
+
+fn format_eta(remaining_bytes: usize, bytes_per_sec: f64) -> Option<String> {
+    if bytes_per_sec <= 0.0 {
+        return None;
+    }
+    let secs = remaining_bytes as f64 / bytes_per_sec;
+    if !secs.is_finite() {
+        return None;
+    }
+    let secs = secs.round() as u64;
+    if secs >= 60 {
+        Some(format!("ETA {}m {}s", secs / 60, secs % 60))
+    } else {
+        Some(format!("ETA {secs}s"))
+    }
+}
+
+/// Download detail with percent/MB plus throughput and ETA.
+fn download_detail(dl: &DownloadProgress, elapsed_secs: f64) -> String {
+    let speed = rate_per_sec(dl.downloaded, elapsed_secs);
+    let speed_text = format_throughput(speed);
+    if dl.total > 0 {
+        let pct = (dl.downloaded as f64 / dl.total as f64) * 100.0;
+        let mut out = format!("{ELLIPSIS_TAIL} {pct:.2}% · {speed_text}");
+        if let Some(eta) = format_eta(dl.total.saturating_sub(dl.downloaded), speed) {
+            out.push_str(&format!(" · {eta}"));
+        }
+        out
+    } else {
+        let mb = dl.downloaded as f64 / (1024.0 * 1024.0);
+        format!("{ELLIPSIS_TAIL} {mb:.1} MB · {speed_text}")
+    }
+}
+
+/// Shorten plain text to at most `max_chars`, adding an ellipsis when cut.
+#[cfg(feature = "serve")]
+fn shorten_plain(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_owned();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let kept: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
 struct Frame {
     progress: ValidationProgress,
     started: Instant,
     color: bool,
+    label: &'static str,
 }
 
 impl Frame {
     fn new(progress: ValidationProgress, color: bool) -> Self {
+        Self::with_label(progress, color, "Validating")
+    }
+
+    fn with_label(progress: ValidationProgress, color: bool, label: &'static str) -> Self {
         Self {
             progress,
             started: Instant::now(),
             color,
+            label,
         }
     }
 }
@@ -196,13 +271,7 @@ impl Display for Frame {
         let total = self.progress.total();
         let passed = self.progress.passed();
         let failed = done.saturating_sub(passed);
-        let elapsed = self.started.elapsed().as_secs_f64();
-
-        let rate = if elapsed > 0.0 {
-            done as f64 / elapsed
-        } else {
-            0.0
-        };
+        let rate = rate_per_sec(done, self.started.elapsed().as_secs_f64());
 
         let line = if self.color {
             let valid = format!("{passed} valid").green();
@@ -211,10 +280,13 @@ impl Display for Frame {
             format!(
                 "{} {} {done}/{total} · {valid} · {fail}{rate}",
                 VALIDATING_ICON.cyan(),
-                "Validating".bold(),
+                self.label.bold(),
             )
         } else {
-            format!("{VALIDATING_ICON} Validating {done}/{total} · {passed} valid · {failed} fail ({rate:.0}/s)")
+            format!(
+                "{} {} {done}/{total} · {passed} valid · {failed} fail ({rate:.0}/s)",
+                VALIDATING_ICON, self.label
+            )
         };
         f.write_str(&fit_terminal(line, self.color, terminal_width()))
     }
@@ -263,6 +335,26 @@ impl ValidationBar {
         })
     }
 
+    pub fn with_label(
+        progress: ValidationProgress,
+        quiet: bool,
+        no_color: bool,
+        stdout_is_pipe: bool,
+        label: &'static str,
+    ) -> Option<Self> {
+        use std::io::IsTerminal as _;
+
+        if !show_progress(quiet, std::io::stderr().is_terminal(), stdout_is_pipe) {
+            return None;
+        }
+        let _cursor = CursorHider::acquire();
+        let status = StatusLine::new(Frame::with_label(progress, use_color(no_color), label));
+        Some(Self {
+            _status: status,
+            _cursor,
+        })
+    }
+
     fn hide(&self) {
         self._status.set_visible(false);
     }
@@ -301,13 +393,7 @@ struct WarmupFrame {
 impl Display for WarmupFrame {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let line = if let Some(dl) = self.download.borrow().as_ref() {
-            let detail = if dl.total > 0 {
-                let pct = (dl.downloaded as f64 / dl.total as f64) * 100.0;
-                format!("{ELLIPSIS_TAIL} {pct:.2}%")
-            } else {
-                let mb = dl.downloaded as f64 / (1024.0 * 1024.0);
-                format!("{ELLIPSIS_TAIL} {mb:.1} MB")
-            };
+            let detail = download_detail(dl, self.started.elapsed().as_secs_f64());
             if self.color {
                 format!("{} {}{}", DOWNLOAD_ICON.cyan(), dl.name, detail.dimmed())
             } else {
@@ -315,12 +401,7 @@ impl Display for WarmupFrame {
             }
         } else if let Some(gathered) = &self.gathered {
             let n = *gathered.borrow();
-            let elapsed = self.started.elapsed().as_secs_f64();
-            let rate = if elapsed > 0.0 {
-                n as f64 / elapsed
-            } else {
-                0.0
-            };
+            let rate = rate_per_sec(n, self.started.elapsed().as_secs_f64());
             if self.color {
                 let rate_text = format!(" ({rate:.0}/s)").dimmed();
                 format!(
@@ -424,13 +505,7 @@ struct ServeFrame {
 impl Display for ServeFrame {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if let Some(dl) = self.download.borrow().as_ref() {
-            let detail = if dl.total > 0 {
-                let pct = (dl.downloaded as f64 / dl.total as f64) * 100.0;
-                format!("{ELLIPSIS_TAIL} {pct:.2}%")
-            } else {
-                let mb = dl.downloaded as f64 / (1024.0 * 1024.0);
-                format!("{ELLIPSIS_TAIL} {mb:.1} MB")
-            };
+            let detail = download_detail(dl, self.started.elapsed().as_secs_f64());
             let line = if self.color {
                 format!("{} {}{}", DOWNLOAD_ICON.cyan(), dl.name, detail.dimmed())
             } else {
@@ -442,7 +517,7 @@ impl Display for ServeFrame {
         let stored = self.pool.len();
         let live = ready >= self.min_ready.max(1);
         let icon = if live { SERVE_ICON } else { PHASE_ICON };
-        let phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        let phase_guard = self.phase.lock().unwrap_or_else(|e| e.into_inner());
         let pool_part = if live {
             format!("pool {ready}/{}", self.pool_size)
         } else {
@@ -453,56 +528,84 @@ impl Display for ServeFrame {
         } else {
             String::new()
         };
-        let line = match self
+        let snapshot = self
             .progress
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
-            Some(progress) => {
-                let done = progress.done();
-                let total = progress.total();
-                let passed = progress.passed();
-                let failed = done.saturating_sub(passed);
-                let elapsed = self.started.elapsed().as_secs_f64();
-                let rate = if elapsed > 0.0 {
-                    done as f64 / elapsed
-                } else {
-                    0.0
-                };
-                if self.color {
-                    format!(
-                        "{} {} · {} · {pool_part}{stored_part} · Validating {done}/{total} · {} · {} ({rate:.0}/s)",
-                        icon.cyan(),
-                        phase.bold(),
-                        self.endpoint.as_str().dimmed(),
-                        format!("{passed} valid").green(),
-                        format!("{failed} fail").red(),
-                    )
-                } else {
-                    format!(
-                        "{icon} {phase} · {} · {pool_part}{stored_part} · Validating {done}/{total} · {passed} valid · {failed} fail ({rate:.0}/s)",
-                        self.endpoint
-                    )
+            .clone();
+        let rate = snapshot
+            .as_ref()
+            .map(|progress| rate_per_sec(progress.done(), self.started.elapsed().as_secs_f64()));
+        let build = |phase: &str, endpoint: &str| -> String {
+            match &snapshot {
+                Some(progress) => {
+                    let done = progress.done();
+                    let total = progress.total();
+                    let passed = progress.passed();
+                    let failed = done.saturating_sub(passed);
+                    let rate = rate.unwrap_or(0.0);
+                    if self.color {
+                        format!(
+                            "{} {} · {} · {pool_part}{stored_part} · Validating {done}/{total} · {} · {} ({rate:.0}/s)",
+                            icon.cyan(),
+                            phase.bold(),
+                            endpoint.dimmed(),
+                            format!("{passed} valid").green(),
+                            format!("{failed} fail").red(),
+                        )
+                    } else {
+                        format!(
+                            "{icon} {phase} · {endpoint} · {pool_part}{stored_part} · Validating {done}/{total} · {passed} valid · {failed} fail ({rate:.0}/s)",
+                        )
+                    }
                 }
-            }
-            None => {
-                if self.color {
-                    format!(
-                        "{} {} · {} · {pool_part}{stored_part}",
-                        icon.cyan(),
-                        phase.bold(),
-                        self.endpoint.as_str().dimmed(),
-                    )
-                } else {
-                    format!(
-                        "{icon} {phase} · {} · {pool_part}{stored_part}",
-                        self.endpoint
-                    )
+                None => {
+                    if self.color {
+                        format!(
+                            "{} {} · {} · {pool_part}{stored_part}",
+                            icon.cyan(),
+                            phase.bold(),
+                            endpoint.dimmed(),
+                        )
+                    } else {
+                        format!("{icon} {phase} · {endpoint} · {pool_part}{stored_part}",)
+                    }
                 }
             }
         };
-        f.write_str(&fit_terminal(line, self.color, terminal_width()))
+        // Shrink the middle (endpoint, then phase) so the trailing rate survives.
+        let mut endpoint = self.endpoint.clone();
+        let mut phase_string = (*phase_guard).to_owned();
+        let width = terminal_width();
+        let mut line = build(&phase_string, &endpoint);
+        if let Some(w) = width {
+            let mut vis = visible_len(&line);
+            while vis > w && endpoint.chars().count() > 1 {
+                let overflow = vis - w;
+                let cur = endpoint.chars().count();
+                let target = cur.saturating_sub(overflow).max(1);
+                let next = shorten_plain(&endpoint, target);
+                if next == endpoint {
+                    break;
+                }
+                endpoint = next;
+                line = build(&phase_string, &endpoint);
+                vis = visible_len(&line);
+            }
+            while vis > w && phase_string.chars().count() > 1 {
+                let overflow = vis - w;
+                let cur = phase_string.chars().count();
+                let target = cur.saturating_sub(overflow).max(1);
+                let next = shorten_plain(&phase_string, target);
+                if next == phase_string {
+                    break;
+                }
+                phase_string = next;
+                line = build(&phase_string, &endpoint);
+                vis = visible_len(&line);
+            }
+        }
+        f.write_str(&fit_terminal(line, self.color, width))
     }
 }
 
@@ -569,12 +672,15 @@ impl OutputGuard for ServeBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        cursor_escape, fit_terminal, show_progress, use_color, visible_len, CursorHider, Frame,
-        WarmupFrame, HIDE_CURSOR, LIVE_CURSOR_HIDERS, SHOW_CURSOR,
-    };
+    #[cfg(feature = "serve")]
+    use super::shorten_plain;
     #[cfg(feature = "serve")]
     use super::ServeFrame;
+    use super::{
+        cursor_escape, download_detail, fit_terminal, format_throughput, rate_per_sec,
+        show_progress, use_color, visible_len, CursorHider, Frame, WarmupFrame, HIDE_CURSOR,
+        LIVE_CURSOR_HIDERS, SHOW_CURSOR,
+    };
     use flx::{DownloadProgress, ValidationProgress};
     #[cfg(feature = "serve")]
     use flx::{RotatorPool, Strategy};
@@ -705,7 +811,8 @@ mod tests {
         let frame = frame("Fetching primary sources …", download, None, true);
         let rendered = with_color(|| frame.to_string());
         assert!(rendered.starts_with("\x1b[36m⇣\x1b[0m GeoLite2-City.mmdb"));
-        assert!(rendered.contains("\x1b[2m … 40.00%\x1b[0m"));
+        assert!(rendered.contains("\x1b[2m … 40.00%"));
+        assert!(rendered.contains("/s"));
         assert!(rendered.ends_with("\x1b[0m"));
         assert!(!rendered.contains("\x1b[1;36m"));
     }
@@ -919,5 +1026,59 @@ mod tests {
 
         assert!(!plain.contains('\x1b'), "{plain}");
         assert!(colored.contains('\x1b'), "{colored}");
+    }
+
+    #[test]
+    fn rate_per_sec_handles_zero_elapsed() {
+        assert_eq!(rate_per_sec(10, 0.0), 0.0);
+        assert_eq!(rate_per_sec(10, 2.0), 5.0);
+    }
+
+    #[test]
+    fn throughput_formats_adaptively() {
+        assert!(format_throughput(2.5 * 1024.0 * 1024.0).contains("MB/s"));
+        assert!(format_throughput(512.0 * 1024.0).contains("KB/s"));
+        assert!(format_throughput(10.0).contains("B/s"));
+    }
+
+    #[test]
+    fn download_detail_shows_speed_and_eta() {
+        let dl = DownloadProgress {
+            name: "GeoLite2-City.mmdb",
+            downloaded: 400,
+            total: 1000,
+        };
+        let detail = download_detail(&dl, 2.0);
+        assert!(detail.contains("40.00%"), "{detail}");
+        assert!(detail.contains("/s"), "{detail}");
+        assert!(detail.contains("ETA"), "{detail}");
+    }
+
+    #[test]
+    fn download_detail_without_total_shows_mb_and_speed() {
+        let dl = DownloadProgress {
+            name: "GeoLite2-City.mmdb",
+            downloaded: 1024 * 1024,
+            total: 0,
+        };
+        let detail = download_detail(&dl, 1.0);
+        assert!(detail.contains("MB"), "{detail}");
+        assert!(detail.contains("/s"), "{detail}");
+    }
+
+    #[test]
+    fn frame_with_pass_two_label() {
+        let frame = Frame::with_label(ValidationProgress::default(), false, "Validating pass 2");
+        let rendered = frame.to_string();
+        assert!(rendered.contains("Validating pass 2"), "{rendered}");
+        assert!(rendered.contains("/s"), "{rendered}");
+    }
+
+    #[cfg(feature = "serve")]
+    #[test]
+    fn shorten_plain_adds_ellipsis_when_cut() {
+        assert_eq!(shorten_plain("abcdef", 6), "abcdef");
+        assert_eq!(shorten_plain("abcdef", 3), "ab…");
+        assert_eq!(shorten_plain("abcdef", 1), "…");
     }
 }
