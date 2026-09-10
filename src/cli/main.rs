@@ -11,10 +11,10 @@ use flx::{
     FetchStage, PauseGate, ProxySource, ProxyValidator, ValidationProgress,
 };
 use futures_util::{Stream, StreamExt};
+use quotas::{split_type_requests, QuotaEnforcer, TypeQuota};
 use std::io::Write as _;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "progress_bar")]
 use style::Colorize;
 use tokio::runtime;
@@ -26,6 +26,7 @@ mod guard;
 mod output;
 #[cfg(feature = "progress_bar")]
 mod progress;
+mod quotas;
 #[cfg(feature = "progress_bar")]
 mod status_line;
 #[cfg(feature = "progress_bar")]
@@ -217,53 +218,20 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn report_invalid_type_value(value: &str) {
-    eprintln!("error: invalid value '{value}' for TYPES");
-}
-
 #[cfg(test)]
 fn convert_protocols(types: &[String]) -> Vec<Protocol> {
     types
         .iter()
-        .filter_map(|type_str| match Protocol::from_str(type_str.as_str()) {
-            Ok(protocol) => Some(protocol),
-            Err(_) => {
-                report_invalid_type_value(type_str);
-                None
-            }
-        })
+        .filter_map(
+            |type_str| match <Protocol as std::str::FromStr>::from_str(type_str) {
+                Ok(protocol) => Some(protocol),
+                Err(_) => {
+                    quotas::report_invalid_type_value(type_str);
+                    None
+                }
+            },
+        )
         .collect()
-}
-
-fn split_type_groups(tokens: &[String]) -> (Vec<Protocol>, Vec<Vec<Protocol>>) {
-    let mut types = Vec::new();
-    let mut groups: Vec<Vec<Protocol>> = Vec::new();
-    for token in tokens {
-        let mut parts: Vec<Protocol> = Vec::new();
-        for part in token.split('+') {
-            match Protocol::from_str(part) {
-                Ok(protocol) => parts.push(protocol),
-                Err(_) => report_invalid_type_value(part),
-            }
-        }
-        match parts.len() {
-            0 => {}
-            1 => types.push(parts[0]),
-            _ => {
-                let mut seen: Vec<Protocol> = Vec::with_capacity(parts.len());
-                parts.retain(|protocol| {
-                    if seen.contains(protocol) {
-                        false
-                    } else {
-                        seen.push(*protocol);
-                        true
-                    }
-                });
-                groups.push(parts);
-            }
-        }
-    }
-    (types, groups)
 }
 
 // Match advertised types tolerating Unknown anonymity sides.
@@ -724,7 +692,13 @@ async fn run_serve(
         return Ok(RunOutcome::Finished);
     }
 
-    let (mut protocols, groups) = split_type_groups(&serve.validator.types);
+    let (type_quotas, groups) = split_type_requests(&serve.validator.types);
+    if type_quotas.iter().any(|quota| quota.quota.is_some()) {
+        anyhow::bail!(
+            "type quotas like HTTP=8 are not supported by `flx serve`; pass plain types instead"
+        );
+    }
+    let mut protocols: Vec<Protocol> = type_quotas.iter().map(|quota| quota.protocol).collect();
     if protocols.is_empty() && groups.is_empty() {
         protocols.push(Protocol::Http(Anonymity::Unknown));
     }
@@ -932,10 +906,37 @@ async fn run_find(
         return Ok(RunOutcome::Finished);
     }
 
-    let (mut protocols, groups) = split_type_groups(&find.validator.types);
-    if protocols.is_empty() && groups.is_empty() {
-        protocols.push(Protocol::Http(Anonymity::Unknown));
+    let (mut type_quotas, groups) = split_type_requests(&find.validator.types);
+    if type_quotas.is_empty() && groups.is_empty() {
+        let default = TypeQuota::uncapped(Protocol::Http(Anonymity::Unknown));
+        type_quotas.push(default);
     }
+    let protocols: Vec<Protocol> = type_quotas.iter().map(|quota| quota.protocol).collect();
+    // Shared quota state so pass 2 resumes with pass-1 room left.
+    let quota_enforcer: Arc<Mutex<QuotaEnforcer>> =
+        Arc::new(Mutex::new(QuotaEnforcer::new(type_quotas)));
+    {
+        let has_groups = !groups.is_empty();
+        quota_enforcer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_has_groups(has_groups);
+    }
+    let has_quotas = quota_enforcer
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .has_any_quota();
+    // Probes for filled families are pointless: strict output would reject
+    // their results, so the validator skips them (groups always probe).
+    let probe_gate: Option<flx::ProbeGate> = has_quotas.then(|| {
+        let enforcer = Arc::clone(&quota_enforcer);
+        Arc::new(move |requested: Protocol| {
+            !enforcer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_protocol_closed(requested)
+        }) as flx::ProbeGate
+    });
 
     // Record pass-1 candidates for fallback without re-fetching.
     let recordings: Arc<std::sync::Mutex<Vec<Proxy>>> = Arc::default();
@@ -980,7 +981,8 @@ async fn run_find(
         })
     };
     let warmup = make_warmup(quiet, no_color, download, false, None);
-    let config = validator_config(&find.validator, protocols.clone(), groups.clone(), false);
+    let mut config = validator_config(&find.validator, protocols.clone(), groups.clone(), false);
+    config.probe_gate = probe_gate.clone();
 
     let mut pass1 = if !find.validator.files.is_empty() {
         if let Some(bar) = &warmup {
@@ -1094,6 +1096,7 @@ async fn run_find(
                 leave_open: true,
             }),
             stats: Some(Arc::clone(&run_stats)),
+            quotas: Some(Arc::clone(&quota_enforcer)),
         },
     )
     .await;
@@ -1115,17 +1118,30 @@ async fn run_find(
         return outcome1;
     }
 
-    // Fall back when pass 1 misses types or the limit.
+    // Fall back when pass 1 misses types or the limit. Quota runs compare
+    // emitted rows (not validated probes) so capped types stop at `=n`.
     let limit = find.output.limit;
     let p1_passed = progress1.passed();
-    let needs_fallback = may_fallback && (p1_passed == 0 || (limit > 0 && p1_passed < limit));
+    let emitted1 = json_doc.as_ref().map_or(p1_passed, |doc| doc.items());
+    let needs_fallback = if has_quotas {
+        let enforcer = quota_enforcer.lock().unwrap_or_else(|e| e.into_inner());
+        let room = limit == 0 || emitted1 < limit;
+        let other_capacity = enforcer.has_uncapped() || !groups.is_empty();
+        may_fallback && room && (emitted1 == 0 || enforcer.has_unfilled() || other_capacity)
+    } else {
+        may_fallback && (p1_passed == 0 || (limit > 0 && p1_passed < limit))
+    };
 
     if needs_fallback {
         let requested = protocols;
         let candidates: Vec<Proxy> =
             std::mem::take(&mut *recordings.lock().expect("recorder poisoned"));
         let mut options2 = find.output.clone();
-        options2.limit = if limit > 0 { limit - p1_passed } else { 0 };
+        options2.limit = if limit > 0 {
+            limit.saturating_sub(if has_quotas { emitted1 } else { p1_passed })
+        } else {
+            0
+        };
 
         if candidates.is_empty() {
             // Skip empty fallback passes without judge preflight.
@@ -1139,10 +1155,9 @@ async fn run_find(
             return Ok(RunOutcome::Finished);
         }
 
-        let validate2 = ProxyValidator::validate(
-            futures_util::stream::iter(candidates),
-            validator_config(&find.validator, requested, Vec::new(), true),
-        );
+        let mut config2 = validator_config(&find.validator, requested, Vec::new(), true);
+        config2.probe_gate = probe_gate.clone();
+        let validate2 = ProxyValidator::validate(futures_util::stream::iter(candidates), config2);
         tokio::pin!(validate2);
         let mut pass2 = tokio::select! {
             pass = &mut validate2 => pass.context("failed to start proxy validator")?,
@@ -1183,6 +1198,7 @@ async fn run_find(
                     leave_open: false,
                 }),
                 stats: Some(Arc::clone(&run_stats)),
+                quotas: Some(Arc::clone(&quota_enforcer)),
             },
         )
         .await;
@@ -1422,5 +1438,6 @@ fn validator_config(
         support_referer: options.support_referer,
         retry_delay: std::time::Duration::from_millis(options.retry_delay_ms),
         report_failures: options.report_failures.is_some(),
+        probe_gate: None,
     }
 }

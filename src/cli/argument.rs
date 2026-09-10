@@ -2,14 +2,11 @@ use clap::builder::PossibleValue;
 use clap::builder::TypedValueParser;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::LazyLock;
 
 pub(crate) fn is_valid_type_value(value: &str) -> bool {
-    // Accept protocol tokens with anonymity annotations in `+` combinations.
-    value
-        .split('+')
-        .all(|part| !part.is_empty() && flx::Protocol::from_str(part).is_ok())
+    // Accepts `TYPE=n` quotas and `+` AND-groups (no quotas inside groups).
+    super::quotas::is_valid_type_value(value)
 }
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
@@ -314,6 +311,8 @@ static HTTPS_JUDGE_DEFAULTS: LazyLock<String> =
 #[derive(Args, Debug, Clone)]
 pub struct ValidatorArgs {
     /// Proxy types to validate (HTTP, HTTPS, SOCKS4, SOCKS5, CONNECT:80, CONNECT:25).
+    /// Append `=n` to cap one type, e.g. `HTTP=8 HTTPS=2`. Quotas are not
+    /// allowed inside `+` AND-groups.
     #[arg(num_args(1..), value_parser = TypesValueParser, help_heading = "Validation")]
     pub types: Vec<String>,
 

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::Protocol;
@@ -13,6 +14,12 @@ pub const DEFAULT_HTTPS_JUDGE_URLS: &[&str] = &[
     "https://aranguren.org/azenv.php",
     "https://wfuchs.de/azenv.php",
 ];
+
+/// Decides whether a requested protocol may still be probed.
+///
+/// CLI quota runs share one gate over the output enforcer: protocols whose
+/// family quotas are all filled return false so workers skip those probes.
+pub type ProbeGate = Arc<dyn Fn(Protocol) -> bool + Send + Sync>;
 
 pub struct Config {
     pub concurrency_limit: usize,
@@ -33,6 +40,8 @@ pub struct Config {
     pub retry_delay: Duration,
     /// Emit machine-readable report for every failed probe.
     pub report_failures: bool,
+    /// Skip probes for requested protocols the gate closes (`None` probes all).
+    pub probe_gate: Option<ProbeGate>,
 }
 
 pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
@@ -59,6 +68,7 @@ impl Default for Config {
             support_referer: false,
             retry_delay: Duration::ZERO,
             report_failures: false,
+            probe_gate: None,
         }
     }
 }

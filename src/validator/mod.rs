@@ -26,7 +26,7 @@ use tokio::{
 };
 
 pub use config::{
-    Config, DEFAULT_CONCURRENCY_LIMIT, DEFAULT_HTTPS_JUDGE_URLS, DEFAULT_HTTP_JUDGE_URLS,
+    Config, ProbeGate, DEFAULT_CONCURRENCY_LIMIT, DEFAULT_HTTPS_JUDGE_URLS, DEFAULT_HTTP_JUDGE_URLS,
 };
 pub use progress::{JudgeHealthReport, ValidationProgress};
 pub use tunnel::ValidationStatus;
@@ -335,6 +335,7 @@ impl ProxyValidator {
         let concurrency_limit = config.concurrency_limit;
         let insecure = config.insecure;
         let probe_missed = config.probe_missed_types;
+        let probe_gate = config.probe_gate.clone();
         let support_cookies = config.support_cookies;
         let support_referer = config.support_referer;
         let preflight_timeout = Duration::from_secs(config.request_timeout);
@@ -620,9 +621,11 @@ impl ProxyValidator {
             let worker_group_tx = group_tx.clone();
             let worker_failures = failure_tx.clone();
             let worker_pause = Arc::clone(&manager_pause);
+            let worker_gate = probe_gate.clone();
             jobs.for_each_concurrent(concurrency_limit, move |job| {
                 let sender = sender.clone();
                 let pause = worker_pause.clone();
+                let gate = worker_gate.clone();
                 let counters = worker_counters.clone();
                 let targets = targets.clone();
                 let group_tx = worker_group_tx.clone();
@@ -646,6 +649,12 @@ impl ProxyValidator {
                             protocol,
                             requested,
                         } => {
+                            // Quota runs close filled protocols: count the job
+                            // done without probing or reporting a failure.
+                            if gate.as_ref().is_some_and(|gate| !gate(requested)) {
+                                counters.done.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
                             if let Err(_e) = do_work(
                                 SingletonJob {
                                     proxy,
@@ -781,8 +790,8 @@ impl Drop for ProxyValidator {
 mod tests {
     use super::{
         advertised_matches_request, group_finish, result_satisfies_request,
-        validator_channel_capacity, Config, GroupState, ProxyValidator, VALIDATOR_CHANNEL_MAX,
-        VALIDATOR_CHANNEL_MIN,
+        validator_channel_capacity, Config, GroupState, ProbeGate, ProxyValidator,
+        VALIDATOR_CHANNEL_MAX, VALIDATOR_CHANNEL_MIN,
     };
     use crate::proxy::models::{Anonymity, Protocol, Proxy, ProxyType};
 
@@ -1196,6 +1205,40 @@ mod tests {
             .proxy_types
             .iter()
             .any(|pt| matches!(pt.protocol, Protocol::Http(_))));
+    }
+
+    #[tokio::test]
+    async fn probe_gate_skips_closed_protocols_without_probing() {
+        // Close HTTP from the start: advertised HTTP jobs must count done
+        // without touching the judge or emitting output.
+        let judge = spawn_echo_judge().await;
+        let gate: ProbeGate =
+            std::sync::Arc::new(|requested: Protocol| !matches!(requested, Protocol::Http(_)));
+        let config = Config {
+            types: vec![Protocol::Http(Anonymity::Unknown)],
+            http_judge_urls: vec![judge],
+            https_judge_urls: vec![],
+            probe_gate: Some(gate),
+            ..Config::default()
+        };
+        // Closed ports fail fast if anything is ever probed.
+        let candidates = (1u16..=2).map(|port| {
+            Proxy::with_expected_types(
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+                std::sync::Arc::from([Protocol::Http(Anonymity::Unknown)]),
+            )
+        });
+        let mut validator =
+            ProxyValidator::validate(futures_util::stream::iter(candidates), config)
+                .await
+                .unwrap();
+        let progress = validator.progress();
+        assert!(validator.get_one().await.is_none());
+        while validator.get_one().await.is_some() {}
+        assert_eq!(progress.total(), 2);
+        assert_eq!(progress.done(), 2);
+        assert_eq!(progress.passed(), 0);
     }
 
     /// Spawn mock HTTP proxy echoing the judge token.

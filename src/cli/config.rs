@@ -248,7 +248,7 @@ fn ensure_valid_type(value: &str, key: &str) -> Result<(), ConfigError> {
         Err(ConfigError::value(
             key,
             value,
-            "HTTP, HTTPS, SOCKS4, SOCKS5, CONNECT:port, optionally with :Anonymity, joined by +",
+            "HTTP, HTTPS, SOCKS4, SOCKS5, CONNECT:port, optionally with :Anonymity or =n quota, joined by + (no quotas in + groups)",
         ))
     }
 }
@@ -772,7 +772,7 @@ pub fn template() -> &'static str {
 # exclude_types = ["SOCKS4"]               # --exclude-type
 
 [validate]
-# types = ["HTTP:Elite", "SOCKS5", "HTTP+HTTPS"]
+# types = ["HTTP:Elite", "SOCKS5", "HTTP+HTTPS", "HTTP=8"]
 # concurrency = 500                        # --max-connections
 # max_attempts = 1
 # retry_delay_ms = 0

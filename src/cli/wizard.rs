@@ -190,7 +190,7 @@ fn run_questions<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> anyhow
     let types = split_list(&ask(
         reader,
         writer,
-        "Proxy types to validate, comma-separated (e.g. HTTP, SOCKS5, HTTP:Elite)",
+        "Proxy types to validate, comma-separated (e.g. HTTP, SOCKS5, HTTP:Elite, HTTP=5)",
         "HTTP",
     )?)
     .into_iter()

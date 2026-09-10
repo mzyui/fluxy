@@ -491,11 +491,13 @@ fn find_without_types_parses_cleanly() {
 
 #[test]
 fn types_split_into_singletons_and_and_groups() {
-    let (types, groups) = split_type_groups(&[
+    let (quotas, groups) = super::quotas::split_type_requests(&[
         "HTTP".to_owned(),
         "HTTP+HTTPS".to_owned(),
         "SOCKS5".to_owned(),
     ]);
+    let types: Vec<Protocol> = quotas.iter().map(|quota| quota.protocol).collect();
+    assert!(quotas.iter().all(|quota| quota.quota.is_none()));
     assert_eq!(
         types,
         vec![Protocol::Http(Anonymity::Unknown), Protocol::Socks5]
@@ -517,7 +519,8 @@ fn anonymity_annotated_types_parse_and_validate_at_cli() {
         "SOCKS5",
         "HTTP:Anonymous+SOCKS5",
     ]);
-    let (types, groups) = split_type_groups(&args.validator.types);
+    let (quotas, groups) = super::quotas::split_type_requests(&args.validator.types);
+    let types: Vec<Protocol> = quotas.iter().map(|quota| quota.protocol).collect();
     assert_eq!(
         types,
         vec![
@@ -534,9 +537,197 @@ fn anonymity_annotated_types_parse_and_validate_at_cli() {
 }
 
 #[test]
+fn quota_tokens_parse_with_caps() {
+    let args = find_from(&["HTTP=8", "HTTPS:Elite=2", "SOCKS5"]);
+    let (quotas, groups) = super::quotas::split_type_requests(&args.validator.types);
+    assert!(groups.is_empty());
+    assert_eq!(
+        quotas,
+        vec![
+            super::quotas::TypeQuota {
+                protocol: Protocol::Http(Anonymity::Unknown),
+                quota: Some(8),
+            },
+            super::quotas::TypeQuota {
+                protocol: Protocol::Https(Anonymity::Elite),
+                quota: Some(2),
+            },
+            super::quotas::TypeQuota {
+                protocol: Protocol::Socks5,
+                quota: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn quota_tokens_rejected_in_groups_and_at_zero() {
+    assert!(Cli::try_parse_from(["flx", "find", "HTTP=2+HTTPS"]).is_err());
+    assert!(Cli::try_parse_from(["flx", "find", "HTTP=0"]).is_err());
+    assert!(Cli::try_parse_from(["flx", "find", "HTTP=3"]).is_ok());
+}
+
+fn quota_proxy(ip: u8, protocol: Protocol) -> Proxy {
+    let mut proxy = sample_proxy(ip);
+    proxy
+        .proxy_types
+        .push(flx::proxy::models::ProxyType::checked(protocol));
+    proxy
+}
+
+fn run_with_quotas(
+    proxies: &[Proxy],
+    quotas: Vec<super::quotas::TypeQuota>,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let rt = runtime::Builder::new_current_thread().build().unwrap();
+    let (options, path) = output_options("json-lines", limit);
+    let enforcer = Arc::new(std::sync::Mutex::new(super::quotas::QuotaEnforcer::new(
+        quotas,
+    )));
+    rt.block_on(async {
+        process_result(
+            stream::iter(proxies.to_vec()),
+            options,
+            Arc::new(tokio::sync::Notify::new()),
+            &NoopGuard,
+            FinalizeOpts {
+                quotas: Some(enforcer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let content = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    parse_json_lines(&content)
+}
+
+#[test]
+fn process_result_caps_single_quota_below_global_limit() {
+    let proxies: Vec<Proxy> = (1u8..=4)
+        .map(|ip| quota_proxy(ip, Protocol::Http(Anonymity::Elite)))
+        .collect();
+    let kept = run_with_quotas(
+        &proxies,
+        vec![super::quotas::TypeQuota {
+            protocol: Protocol::Http(Anonymity::Unknown),
+            quota: Some(2),
+        }],
+        10,
+    );
+    assert_eq!(kept.len(), 2, "an explicit =n cap stops below --limit");
+}
+
+#[test]
+fn process_result_mixed_quota_and_uncapped_fills_global_limit() {
+    let mut proxies: Vec<Proxy> = (1u8..=3)
+        .map(|ip| quota_proxy(ip, Protocol::Http(Anonymity::Elite)))
+        .collect();
+    proxies.extend((11u8..=15).map(|ip| quota_proxy(ip, Protocol::Socks5)));
+    let kept = run_with_quotas(
+        &proxies,
+        vec![
+            super::quotas::TypeQuota {
+                protocol: Protocol::Http(Anonymity::Unknown),
+                quota: Some(2),
+            },
+            super::quotas::TypeQuota {
+                protocol: Protocol::Socks5,
+                quota: None,
+            },
+        ],
+        4,
+    );
+    assert_eq!(kept.len(), 4, "uncapped types fill the rest of --limit");
+    let http = kept
+        .iter()
+        .filter(|v| v["type"][0]["protocol"]["family"] == "Http")
+        .count();
+    assert_eq!(http, 2, "capped HTTP must stop at =2");
+}
+
+// Counts upstream polls to prove filled quotas stop the stream early.
+struct CountingStream {
+    items: std::vec::IntoIter<Proxy>,
+    polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl futures_util::Stream for CountingStream {
+    type Item = Proxy;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Proxy>> {
+        self.polls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::task::Poll::Ready(self.items.next())
+    }
+}
+
+#[test]
+fn process_result_strict_quota_rejects_same_family_mismatch() {
+    let anonymous = quota_proxy(1, Protocol::Https(Anonymity::Anonymous));
+    let elite = quota_proxy(2, Protocol::Https(Anonymity::Elite));
+    let kept = run_with_quotas(
+        &[anonymous, elite],
+        vec![super::quotas::TypeQuota {
+            protocol: Protocol::Https(Anonymity::Elite),
+            quota: Some(2),
+        }],
+        10,
+    );
+    assert_eq!(kept.len(), 1, "anonymous must not consume an Elite quota");
+    assert_eq!(kept[0]["type"][0]["protocol"]["anonymity"], "Elite");
+}
+
+#[test]
+fn process_result_stops_reading_once_quotas_fill() {
+    let proxies: Vec<Proxy> = (1u8..=100)
+        .map(|ip| quota_proxy(ip, Protocol::Http(Anonymity::Elite)))
+        .collect();
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rt = runtime::Builder::new_current_thread().build().unwrap();
+    let (options, path) = output_options("json-lines", 0);
+    let enforcer = Arc::new(std::sync::Mutex::new(super::quotas::QuotaEnforcer::new(
+        vec![super::quotas::TypeQuota {
+            protocol: Protocol::Http(Anonymity::Unknown),
+            quota: Some(2),
+        }],
+    )));
+    rt.block_on(async {
+        process_result(
+            CountingStream {
+                items: proxies.into_iter(),
+                polls: Arc::clone(&polls),
+            },
+            options,
+            Arc::new(tokio::sync::Notify::new()),
+            &NoopGuard,
+            FinalizeOpts {
+                quotas: Some(enforcer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let content = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(parse_json_lines(&content).len(), 2);
+    assert!(
+        polls.load(std::sync::atomic::Ordering::Relaxed) <= 5,
+        "stream must stop once quotas fill, polls = {}",
+        polls.load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+#[test]
 fn and_group_deduplicates_repeated_members() {
-    let (types, groups) = split_type_groups(&["HTTP+HTTPS+HTTP".to_owned()]);
-    assert!(types.is_empty());
+    let (quotas, groups) = super::quotas::split_type_requests(&["HTTP+HTTPS+HTTP".to_owned()]);
+    assert!(quotas.is_empty());
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].len(), 2);
 }
@@ -673,6 +864,7 @@ fn json_empty_is_suppressed_when_requested() {
                 emit_csv_header: true,
                 stats: None,
                 continue_json: None,
+                quotas: None,
             },
         )
         .await
@@ -702,6 +894,7 @@ fn run_chained_passes(format: &str, pass1: &[Proxy], pass2: &[Proxy]) -> String 
                     doc: Arc::clone(&doc),
                     leave_open: true,
                 }),
+                quotas: None,
             },
         )
         .await
@@ -719,6 +912,7 @@ fn run_chained_passes(format: &str, pass1: &[Proxy], pass2: &[Proxy]) -> String 
                     doc,
                     leave_open: false,
                 }),
+                quotas: None,
             },
         )
         .await
@@ -761,6 +955,7 @@ fn skipped_fallback_after_partial_pass_closes_the_open_array() {
                     doc: Arc::clone(&doc),
                     leave_open: true,
                 }),
+                quotas: None,
             },
         )
         .await
@@ -798,6 +993,7 @@ fn skipped_fallback_with_an_empty_pass_emits_one_empty_array() {
                     doc: Arc::clone(&doc),
                     leave_open: true,
                 }),
+                quotas: None,
             },
         )
         .await

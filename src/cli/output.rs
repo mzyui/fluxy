@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use super::argument::OutputOptions;
 use super::filters::ProxyFilter;
 use super::guard::OutputGuard;
+use super::quotas::QuotaEnforcer;
 use super::RunOutcome;
 
 // Resolve `default` format from `-o` extension or piped stdout.
@@ -146,6 +147,8 @@ pub struct FinalizeOpts {
     pub continue_json: Option<JsonContinuation>,
     // Shared distribution collector across chained passes.
     pub stats: Option<Arc<RunStats>>,
+    // Shared per-type quotas (`TYPE=n`); None keeps legacy limit-only output.
+    pub quotas: Option<Arc<Mutex<QuotaEnforcer>>>,
 }
 
 impl Default for FinalizeOpts {
@@ -155,6 +158,7 @@ impl Default for FinalizeOpts {
             emit_csv_header: true,
             continue_json: None,
             stats: None,
+            quotas: None,
         }
     }
 }
@@ -226,6 +230,16 @@ fn render_pac(proxies: &[Proxy]) -> String {
     out
 }
 
+// Whether per-type quotas are all filled with nothing uncapped left.
+fn quotas_satisfied(quotas: &Option<Arc<Mutex<QuotaEnforcer>>>) -> bool {
+    quotas.as_ref().is_some_and(|enforcer| {
+        enforcer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_satisfied()
+    })
+}
+
 pub async fn process_result<S>(
     source: S,
     options: OutputOptions,
@@ -279,46 +293,64 @@ where
     let _csv = format == "csv";
     let mut cancelled = false;
     let filter = Arc::new(ProxyFilter::from_options(&options));
-    let source: std::pin::Pin<Box<dyn Stream<Item = Proxy> + Send>> =
-        if options.sort.is_some() || options.shuffle {
-            // Buffer sorted output interruptibly so cancel keeps arrivals.
-            let mut buffered: Vec<Proxy> = Vec::new();
-            let mut src = std::pin::pin!(source);
-            loop {
-                tokio::select! {
-                    _ = cancel.notified(), if !cancelled => {
-                        cancelled = true;
-                        break;
-                    }
-                    item = src.next() => {
-                        let Some(proxy) = item else { break };
-                        // Filter while buffering so limits count kept results.
-                        if filter.matches(&proxy) {
-                            buffered.push(proxy);
-                            if options.limit > 0 && buffered.len() >= options.limit {
-                                break;
+    let quotas = finalize.quotas.clone();
+    let buffered_path = options.sort.is_some() || options.shuffle;
+    let source: std::pin::Pin<Box<dyn Stream<Item = Proxy> + Send>> = if buffered_path {
+        // Buffer sorted output interruptibly so cancel keeps arrivals.
+        let mut buffered: Vec<Proxy> = Vec::new();
+        let mut src = std::pin::pin!(source);
+        loop {
+            tokio::select! {
+                _ = cancel.notified(), if !cancelled => {
+                    cancelled = true;
+                    break;
+                }
+                item = src.next() => {
+                    let Some(proxy) = item else { break };
+                    // Filter while buffering so limits count kept results.
+                    if filter.matches(&proxy) {
+                        // Skip quota-capped types without counting them.
+                        if let Some(enforcer) = &quotas {
+                            let mut enforcer = enforcer
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            if !enforcer.should_emit(&proxy) {
+                                if enforcer.is_satisfied() {
+                                    break;
+                                }
+                                continue;
                             }
+                        }
+                        buffered.push(proxy);
+                        if options.limit > 0 && buffered.len() >= options.limit {
+                            break;
+                        }
+                        if quotas_satisfied(&quotas) {
+                            break;
                         }
                     }
                 }
             }
-            if options.shuffle {
-                flx::shuffle_proxies(&mut buffered);
-            }
-            if let Some(sort) = options.sort.as_deref() {
-                sort_proxies(&mut buffered, sort, Some(options.order.as_str()));
-            }
-            Box::pin(futures_util::stream::iter(buffered))
-        } else {
-            Box::pin(source)
-        };
-    // Reapply the pure filter on the sorted path as a no-op.
-    let mut source = std::pin::pin!(source
-        .filter_map(move |proxy| {
-            let filter = Arc::clone(&filter);
-            async move { filter.matches(&proxy).then_some(proxy) }
-        })
-        .enumerate());
+        }
+        if options.shuffle {
+            flx::shuffle_proxies(&mut buffered);
+        }
+        if let Some(sort) = options.sort.as_deref() {
+            sort_proxies(&mut buffered, sort, Some(options.order.as_str()));
+        }
+        Box::pin(futures_util::stream::iter(buffered))
+    } else {
+        Box::pin(source)
+    };
+    // Reapply the pure filter as a no-op on the buffered path; quotas are
+    // enforced per item below so filled caps stop the stream early.
+    let mut source = std::pin::pin!(source.filter_map(move |proxy| {
+        let filter = Arc::clone(&filter);
+        async move { filter.matches(&proxy).then_some(proxy) }
+    }));
+    // Rows emitted by this pass; the global `--limit` and quota caps count
+    // kept rows, never skipped ones.
+    let mut rows: usize = 0;
 
     // Collect all proxies before rendering PAC output.
     if format == "pac" {
@@ -330,11 +362,25 @@ where
                     break;
                 }
                 item = source.next() => {
-                    let Some((_index, proxy)) = item else { break };
-                    if options.limit > 0 && proxies.len() >= options.limit {
-                        break;
+                    let Some(proxy) = item else { break };
+                    if let Some(enforcer) = &quotas {
+                        let mut enforcer =
+                            enforcer.lock().unwrap_or_else(|e| e.into_inner());
+                        if !enforcer.should_emit(&proxy) {
+                            if enforcer.is_satisfied() {
+                                break;
+                            }
+                            continue;
+                        }
                     }
                     proxies.push(proxy);
+                    rows += 1;
+                    if options.limit > 0 && rows >= options.limit {
+                        break;
+                    }
+                    if quotas_satisfied(&quotas) {
+                        break;
+                    }
                 }
             }
         }
@@ -408,8 +454,18 @@ where
                 break;
             }
             item = source.next() => {
-                let Some((index, proxy)) = item else { break };
-                let should_end = options.limit > 0 && index + 1 >= options.limit;
+                let Some(proxy) = item else { break };
+                // Enforce quotas before serializing; filled caps stop early.
+                if let Some(enforcer) = &quotas {
+                    let mut enforcer =
+                        enforcer.lock().unwrap_or_else(|e| e.into_inner());
+                    if !enforcer.should_emit(&proxy) {
+                        if enforcer.is_satisfied() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 buf.clear();
                 // Skip failed items without leaving dangling separators.
                 let mut emitted = true;
@@ -502,8 +558,9 @@ where
                     if let Some(stats) = &finalize.stats {
                         stats.record(&proxy);
                     }
+                    rows += 1;
                 }
-                if should_end {
+                if (options.limit > 0 && rows >= options.limit) || quotas_satisfied(&quotas) {
                     break;
                 }
             }
