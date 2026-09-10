@@ -80,6 +80,15 @@ flx find -f proxies.txt HTTP SOCKS5 HTTPS
 flx find HTTP+HTTPS HTTP:Elite
 ```
 
+Cap how many of each type to keep with `TYPE=n` (shell-safe, no quoting needed). Capped types stop at `n` — the run ends once every quota is filled — while uncapped types fill the rest of `--limit`:
+
+```bash
+flx find HTTP=8 HTTPS=2          # at most 8 HTTP and 2 HTTPS
+flx find HTTP=2 HTTPS -l 10      # at most 2 HTTP, HTTPS fills up to 10 total
+```
+
+Matching is strict per family: `HTTPS:Elite=2` emits only Elite HTTPS and rejects other levels. Quotas are not allowed inside `+` groups or with `serve`.
+
 ## Output formats
 
 Nine formats: `text`, `json`, `json-lines`, `pretty-json`, `csv`, `prefix`, `pac`, `proxychains`, and the human-readable default.
