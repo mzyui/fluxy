@@ -2,6 +2,16 @@
   <img src="https://socialify.git.ci/mzyui/flx/image?description=1&font=Source+Code+Pro&forks=1&issues=1&language=1&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto"></img>
 </div>
 
+<div align="center">
+
+[![Docs](https://img.shields.io/badge/docs-rustdoc-blue)](https://mzyui.github.io/flx/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/mzyui/flx)](https://github.com/mzyui/flx/releases)
+[![Release workflow](https://github.com/mzyui/flx/actions/workflows/release.yaml/badge.svg)](https://github.com/mzyui/flx/actions/workflows/release.yaml)
+[![Docs workflow](https://github.com/mzyui/flx/actions/workflows/docs.yaml/badge.svg)](https://github.com/mzyui/flx/actions/workflows/docs.yaml)
+
+</div>
+
 flx is a fast proxy scraper & validator written in Rust. It collects free proxies from 13 sources, validates them against online judges (HTTP, HTTPS, SOCKS4, SOCKS5, CONNECT), filters by anonymity / country / IP type / response time, and exports in 9 formats. It ships as both a CLI (`flx`) and a Rust library.
 
 ## Demo
