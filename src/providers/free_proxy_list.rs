@@ -6,6 +6,7 @@ use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 use crate::proxy::models::{Anonymity, Protocol};
 
+/// Scrapes free-proxy-list.net mirrors (HTTP, HTTPS, SOCKS).
 pub struct FreeProxyListProvider;
 
 #[async_trait]

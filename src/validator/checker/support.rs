@@ -76,6 +76,10 @@ pub(crate) async fn read_bounded_body(
     Ok(Bytes::from(collected))
 }
 
+/// Classifies proxy anonymity from a judge response body.
+///
+/// Returns [`Anonymity::Transparent`] when the body leaks `my_ip`, [`Anonymity::Anonymous`]
+/// when it contains proxy-revealing headers, and [`Anonymity::Elite`] otherwise.
 pub fn classify_anonymity(body: &str, my_ip: &str) -> Anonymity {
     if body.contains(my_ip) {
         Anonymity::Transparent
@@ -89,6 +93,10 @@ pub fn classify_anonymity(body: &str, my_ip: &str) -> Anonymity {
     }
 }
 
+/// One online judge plus the token markers used to recognize its echo.
+///
+/// Build with [`ValidationTarget::online`]; per-judge health is tracked
+/// separately so workers update it without pool locking.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationTarget {
     pub(crate) url: String,
@@ -107,6 +115,11 @@ pub(crate) struct TargetHealth {
 }
 
 impl ValidationTarget {
+    /// Builds a judge target from an `http(s)` URL, minting a fresh request token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL is unparsable, uses a non-`http(s)` scheme, or lacks a host.
     pub fn online(url: &str) -> anyhow::Result<Self> {
         let uri: hyper::Uri = url
             .parse()
@@ -134,6 +147,12 @@ impl ValidationTarget {
         })
     }
 
+    /// Verifies the judge echoes this target's token within `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on timeout, non-success status, oversized body, a missing
+    /// token echo, or TLS failure (self-signed judges need `insecure`).
     pub async fn verify_online(&self, timeout: Duration, insecure: bool) -> anyhow::Result<()> {
         use hyper_util::{
             client::legacy::{connect::HttpConnector, Client},

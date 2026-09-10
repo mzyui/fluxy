@@ -93,6 +93,13 @@ impl Flx {
         Self::default()
     }
 
+    /// Loads candidates from one file without blocking.
+    ///
+    /// Shorthand for [`Flx::from_files`] with a single path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FlxError::Io`] when the file cannot be opened.
     pub fn from_file(path: impl Into<PathBuf>) -> Result<Self, FlxError> {
         Self::from_files([path.into()])
     }
@@ -448,6 +455,9 @@ pub struct ValidationRun {
 }
 
 impl ValidationRun {
+    /// Clones the live validation counters for this run.
+    ///
+    /// Zeroed when validation was skipped with [`Flx::no_validate`].
     pub fn progress(&self) -> ValidationProgress {
         self.progress.clone()
     }

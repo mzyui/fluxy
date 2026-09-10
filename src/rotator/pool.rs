@@ -37,6 +37,9 @@ pub struct RotatorPool {
 }
 
 impl RotatorPool {
+    /// Creates an empty pool using `strategy` for picks.
+    ///
+    /// Only available with the `serve` Cargo feature.
     pub fn new(strategy: Strategy) -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
@@ -63,10 +66,12 @@ impl RotatorPool {
         true
     }
 
+    /// Number of pooled proxies, including those in cooldown.
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    /// Whether the pool holds no proxies at all.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -100,6 +105,7 @@ impl RotatorPool {
         })
     }
 
+    /// Clears the failure streak for `proxy`, making it immediately available.
     pub fn report_success(&self, proxy: &Proxy) {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let text = proxy.as_text();

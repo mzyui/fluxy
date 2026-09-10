@@ -15,6 +15,7 @@ static USER_AGENTS: [&str; 8] = [
 
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
 
+/// Returns the next User-Agent string in round-robin order.
 pub fn next_user_agent() -> &'static str {
     let index = CURSOR.fetch_add(1, Ordering::Relaxed) % USER_AGENTS.len();
     USER_AGENTS[index]

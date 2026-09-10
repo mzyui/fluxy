@@ -9,6 +9,7 @@ use tokio::{
 
 use super::NegotiatorTrait;
 
+/// Negotiates SOCKS5 proxy connections.
 pub struct Socks5Negotiator;
 
 impl Socks5Negotiator {

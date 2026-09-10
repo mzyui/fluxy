@@ -6,6 +6,7 @@ use super::models::{valid_sources, Source};
 use super::ProxyProvider;
 use crate::proxy::models::Protocol;
 
+/// Scrapes the ProxyScrape API feeds (HTTP, SOCKS4, SOCKS5).
 pub struct ProxyscrapeProvider;
 
 const TIMEOUT: Duration = Duration::from_secs(20);

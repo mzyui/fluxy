@@ -26,10 +26,14 @@ struct JudgeTarget {
     request_token: String,
 }
 
+/// Tunnel validation milestone for one probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationStatus {
+    /// TCP connect succeeded; handshake not yet attempted.
     TcpReachable,
+    /// Proxy handshake (CONNECT / SOCKS) succeeded; judge not yet verified.
     HandshakePassed,
+    /// Judge echoed the expected marker end-to-end.
     EndToEndPassed,
 }
 

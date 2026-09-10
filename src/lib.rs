@@ -1,6 +1,10 @@
+#![warn(missing_docs)]
+#![warn(rustdoc::broken_intra_doc_links)]
 //! Fast proxy scraper and validator.
 //!
-//! The [`Flx`] builder mirrors the CLI defaults.
+//! The [`Flx`] builder mirrors the CLI defaults: scrape the built-in
+//! providers or load candidates from files, validate them against online
+//! judges, then filter, sort, and export the survivors.
 //!
 //! # Examples
 //!
@@ -16,6 +20,27 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! See [`Flx`] for the full builder contract, `examples/` for runnable
+//! workflows, and the README for CLI usage.
+//!
+//! ## Features
+//!
+//! - `log` (default): emit `flx::*` records via the `log` crate.
+//! - `progress_bar` (default): CLI progress rendering.
+//! - `clap` (default): enables the `flx` binary.
+//! - `serve` (optional): rotating proxy endpoint (`flx serve`);
+//!   off by default while experimental.
+//!
+//! ## Minimum Supported Rust Version
+//!
+//! Requires a recent stable toolchain (tested on 1.89+). No `rust-version`
+//! floor is declared in `Cargo.toml`; MSRV bumps are treated as a minor
+//! breaking change and noted in release notes.
+//!
+//! ## License
+//!
+//! Licensed under the MIT license (`LICENSE`).
 
 pub mod base_dirs;
 pub mod error;
@@ -165,6 +190,22 @@ impl log::Log for FlxLogger {
 }
 
 /// Reads proxies from files with per-line protocol pinning.
+///
+/// Bare `ip:port` lines inherit all requested protocols; scheme-prefixed
+/// lines (`socks5://…`) pin their own type. `-` means stdin.
+/// See [`load_proxy_files`] for the file-loading helper.
+///
+/// # Examples
+///
+/// ```no_run
+/// use flx::ProxySource;
+///
+/// # fn example() -> anyhow::Result<()> {
+/// let source = ProxySource::from_reader(std::io::Cursor::new("1.2.3.4:8080\n"))?;
+/// let proxies: Vec<_> = source.collect();
+/// # Ok(())
+/// # }
+/// ```
 pub struct ProxySource {
     lines: Lines<Box<dyn BufRead + Send>>,
     default_proxy_types: Arc<[Protocol]>,
@@ -196,10 +237,20 @@ pub(crate) fn write_to_buffer<'a>(
 }
 
 impl ProxySource {
+    /// Builds a fetcher-backed source from `config` without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider set cannot be assembled.
     pub async fn from_fetcher(config: FetcherConfig) -> anyhow::Result<ProxyFetcher> {
         ProxyFetcher::gather(config).await
     }
 
+    /// Opens `filepath` for lazy line-by-line parsing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the file cannot be opened.
     pub fn from_file(filepath: PathBuf) -> anyhow::Result<Self> {
         let file = anyhow::Context::with_context(File::open(&filepath), || {
             format!("failed to open proxy file {}", filepath.display())
@@ -207,6 +258,11 @@ impl ProxySource {
         Self::from_reader(BufReader::new(file))
     }
 
+    /// Wraps any buffered reader as a proxy source.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible; returns `Ok` for API symmetry with [`ProxySource::from_file`].
     pub fn from_reader<R: BufRead + Send + 'static>(reader: R) -> anyhow::Result<Self> {
         let lines = (Box::new(reader) as Box<dyn BufRead + Send>).lines();
 
@@ -218,6 +274,11 @@ impl ProxySource {
         })
     }
 
+    /// Reads candidates from stdin without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible; returns `Ok` for API symmetry with [`ProxySource::from_file`].
     pub fn from_stdin() -> anyhow::Result<Self> {
         Self::from_reader(std::io::BufReader::new(std::io::stdin()))
     }

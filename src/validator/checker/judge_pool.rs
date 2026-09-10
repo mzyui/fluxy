@@ -14,6 +14,10 @@ use super::support::ValidationTarget;
 
 const JUDGE_FAILURE_COOLDOWN: Duration = Duration::from_secs(30);
 
+/// Round-robin pool of preflighted online judges.
+///
+/// Built once via [`JudgePool::build`]; workers fetch per-attempt candidates and
+/// report judge health so failing judges cool down without pool locking.
 pub struct JudgePool {
     judges: Mutex<Vec<Arc<ValidationTarget>>>,
     cursor: AtomicUsize,
@@ -21,6 +25,15 @@ pub struct JudgePool {
 }
 
 impl JudgePool {
+    /// Preflights `urls` concurrently and returns a pool of the judges that pass.
+    ///
+    /// Duplicate URLs are probed once and `on_dropped` is invoked for every URL
+    /// rejected locally or by preflight; the pool returns early once the first
+    /// judge passes while stragglers keep reporting in the background.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `urls` is empty or no candidate passes preflight.
     pub async fn build<F>(
         urls: &[String],
         timeout: Duration,
@@ -140,6 +153,7 @@ impl JudgePool {
         candidates
     }
 
+    /// Parks `target` in cooldown so later candidates skip it temporarily.
     pub fn report_failure(&self, target: &ValidationTarget) {
         let until = self
             .epoch
@@ -169,10 +183,12 @@ impl JudgePool {
         ema.store(next, Ordering::Relaxed);
     }
 
+    /// Number of judges currently in the pool.
     pub fn len(&self) -> usize {
         self.judges.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    /// Whether the pool holds no judges.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

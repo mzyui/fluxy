@@ -11,6 +11,7 @@ use hyper::Uri;
 
 use super::NegotiatorTrait;
 
+/// Negotiates SOCKS4 proxy connections.
 pub struct Socks4Negotiator;
 
 impl Socks4Negotiator {

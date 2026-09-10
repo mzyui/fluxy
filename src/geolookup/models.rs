@@ -1,3 +1,8 @@
+//! GeoIP record types attached to validated proxies.
+//!
+//! [`GeoData`] is the per-proxy record; see [`GeoLookup`](crate::GeoLookup)
+//! for database-backed resolution.
+
 use serde::{
     ser::{SerializeMap, SerializeStruct},
     Serialize,
@@ -5,21 +10,47 @@ use serde::{
 
 use super::ip_type::IpType;
 
+/// Geolocation record attached to a [`Proxy`](crate::Proxy).
+///
+/// All fields are `None`/`Unknown` when lookup is disabled or the address
+/// is unknown; see [`GeoData::is_empty`].
+///
+/// # Examples
+///
+/// ```
+/// use flx::GeoData;
+///
+/// assert!(GeoData::default().is_empty());
+/// ```
 #[derive(Debug, Default, Clone)]
 pub struct GeoData {
+    /// ISO 3166-1 alpha-2 country code (e.g. `ID`).
     pub iso_code: Option<Box<str>>,
+    /// Country name.
     pub name: Option<Box<str>>,
+    /// Region ISO code.
     pub region_iso_code: Option<Box<str>>,
+    /// Region name.
     pub region_name: Option<Box<str>>,
+    /// City name.
     pub city_name: Option<Box<str>>,
+    /// Autonomous system number.
     pub asn: Option<u32>,
+    /// Autonomous system organization.
     pub aso: Option<Box<str>>,
+    /// Address classification; see [`IpType`].
     pub ip_type: IpType,
+    /// Continent code (e.g. `AS`).
     pub continent_code: Option<Box<str>>,
+    /// Continent name.
     pub continent_name: Option<Box<str>>,
+    /// Latitude in degrees.
     pub latitude: Option<f64>,
+    /// Longitude in degrees.
     pub longitude: Option<f64>,
+    /// IANA timezone (e.g. `Asia/Jakarta`).
     pub timezone: Option<Box<str>>,
+    /// Postal code.
     pub zip: Option<Box<str>>,
 }
 

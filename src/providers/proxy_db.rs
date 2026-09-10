@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes proxydb.net paged listings.
 pub struct ProxyDbProvider;
 
 const PAGES: u32 = 3;

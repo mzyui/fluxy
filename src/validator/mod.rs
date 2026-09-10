@@ -1,4 +1,11 @@
+//! Validates proxy candidates against online judges.
+//!
+//! [`ProxyValidator`] streams passing proxies; [`Config`]
+//! tunes concurrency, timeouts, and targets. Per-proxy failures go to the
+//! optional failure channel — see [`ProxyValidator::take_failures`].
+/// Online-judge probing primitives used by the validator workers.
 pub mod checker;
+/// Validator configuration ([`Config`], judge URL defaults, probe gates).
 pub mod config;
 mod progress;
 mod tunnel;
@@ -25,11 +32,15 @@ use tokio::{
     task::JoinHandle,
 };
 
+/// Validator configuration and defaults re-exported for [`ProxyValidator::validate`].
 pub use config::{
     Config, ProbeGate, DEFAULT_CONCURRENCY_LIMIT, DEFAULT_HTTPS_JUDGE_URLS, DEFAULT_HTTP_JUDGE_URLS,
 };
+/// Judge-health and progress snapshots re-exported from the validator.
 pub use progress::{JudgeHealthReport, ValidationProgress};
+/// Tunnel validation milestone reached by one probe.
 pub use tunnel::ValidationStatus;
+/// Machine-readable record of one failed probe.
 pub use work::ProxyFailure;
 use work::{
     advertised_matches_request, aggregate_groups, do_group_work, do_work, GroupMemberJob,
@@ -729,6 +740,7 @@ impl ProxyValidator {
         &self.judge_health
     }
 
+    /// Returns a shared handle to the live validation counters.
     pub fn progress(&self) -> ValidationProgress {
         self.progress.clone()
     }
@@ -753,11 +765,15 @@ impl ProxyValidator {
         Arc::clone(&self.pause_gate)
     }
 
-    /// Take failure receiver for machine-readable probe reports.
+    /// Takes the failure-report receiver; returns [`None`] when reporting is
+    /// disabled or the receiver was already taken. Call before draining the
+    /// stream so no buffered failure records are dropped.
     pub fn take_failures(&mut self) -> Option<mpsc::Receiver<work::ProxyFailure>> {
         self.failures.take()
     }
 
+    /// Receives the next passing proxy, or [`None`] once validation is complete
+    /// and all passing proxies have been consumed.
     pub async fn get_one(&mut self) -> Option<Proxy> {
         self.receiver.recv().await
     }

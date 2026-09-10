@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes proxy-list.org paged listings.
 pub struct ProxyListOrgProvider;
 
 const MAX_PAGES: u32 = 10;

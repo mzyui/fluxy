@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes the ProxyNova API proxy list.
 pub struct ProxyNovaProvider;
 
 #[async_trait]

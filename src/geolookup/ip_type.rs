@@ -1,12 +1,27 @@
 use serde::Serialize;
 
 /// Classify addresses as residential, hosted, or mobile.
+///
+/// Derived from ASN blocklists plus carrier/hosting keywords; unknown when
+/// no signal is present.
+///
+/// # Examples
+///
+/// ```
+/// use flx::IpType;
+///
+/// assert_eq!(IpType::classify(None, None, None, None), IpType::Unknown);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IpType {
+    /// Consumer ISP address.
     Residential,
+    /// Hosting / cloud / datacenter address.
     Datacenter,
+    /// Mobile carrier address.
     Mobile,
+    /// No classification signal.
     #[default]
     Unknown,
 }

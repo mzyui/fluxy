@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes hidemy.name proxy lists.
 pub struct HideMyNameProvider;
 
 #[async_trait]

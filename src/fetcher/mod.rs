@@ -1,3 +1,8 @@
+//! Scrapes built-in providers with dedup, parse cache, and primary/fallback phases.
+//!
+//! [`ProxyFetcher`] is the entry point; see [`Config`]
+//! for tuning and [`FetchStage`] for phase reporting.
+
 mod cache;
 mod config;
 mod dedup;
@@ -352,6 +357,10 @@ async fn finish_phase(mut handles: tokio::task::JoinSet<()>, timeout: Duration) 
 }
 
 impl ProxyFetcher {
+    /// Returns the next accepted candidate, or `None` when exhausted.
+    ///
+    /// Skips duplicates and country-filtered proxies; `None` means all
+    /// providers finished and the channel closed.
     pub async fn get_one(&mut self) -> Option<Proxy> {
         loop {
             let proxy = if let Some(proxy) = self.prefetched.take() {

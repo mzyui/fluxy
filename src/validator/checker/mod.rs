@@ -1,3 +1,4 @@
+//! Online-judge probing: judge pool plus plain-HTTP validation support.
 pub(crate) mod judge_pool;
 pub(crate) mod support;
 

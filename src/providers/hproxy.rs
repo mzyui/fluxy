@@ -6,6 +6,7 @@ use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 use crate::proxy::models::{Anonymity, Protocol};
 
+/// Scrapes the hproxy.com API proxy list.
 pub struct HProxyProvider;
 
 const PROTOCOLS: [(&str, Protocol); 4] = [

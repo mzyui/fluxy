@@ -10,6 +10,7 @@ use serde::{
 
 use crate::proxy::models::{Anonymity, Protocol};
 
+/// One parsed proxy row: address, port, and optional advertised protocol.
 pub type ParsedProxy = (Ipv4Addr, u16, Option<Protocol>);
 const VISITOR_STOPPED: &str = "flx parser visitor stopped";
 // Reserve headroom for split UTF-8 sequences before rejecting overflow.
@@ -195,6 +196,9 @@ static HEADER_SELECTOR: LazyLock<Selector> =
 static CELL_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("td").expect("static cell selector is valid"));
 
+/// Maps a raw protocol label to a [`Protocol`], or `None` when unknown.
+///
+/// Accepts `http`, `https`/`ssl`, `socks4`, and `socks5` case-insensitively.
 pub fn protocol_from_str(raw: &str) -> Option<Protocol> {
     let raw = raw.trim().to_ascii_lowercase();
     match raw.as_str() {
@@ -235,6 +239,9 @@ pub(crate) fn parse_pair(text: &str) -> Option<(Ipv4Addr, u16)> {
     Some((ip, port))
 }
 
+/// Visits untyped `ip:port` rows, one per line; skips invalid lines.
+///
+/// Returning `false` from `visit` stops the scan early.
 pub fn visit_plaintext(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool) {
     // Strip leading BOM corrupting the first ip:port pair.
     let body = body.strip_prefix('\u{feff}').unwrap_or(body);
@@ -256,6 +263,14 @@ struct GeonodeRow<'a> {
     protocols: Vec<Cow<'a, str>>,
 }
 
+/// Visits Geonode `{ data: [...] }` rows, expanding listed protocols.
+///
+/// Rows without protocols are visited untyped; invalid rows are skipped.
+/// Returning `false` from `visit` stops deserialization early.
+///
+/// # Errors
+///
+/// Returns an error when `body` is not valid Geonode JSON.
 pub fn visit_geonode(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool) -> anyhow::Result<()> {
     visit_json_data::<GeonodeRow, _>(body, |row| {
         let (Ok(ip), Ok(port)) = (row.ip.parse::<Ipv4Addr>(), row.port.parse::<u16>()) else {
@@ -380,6 +395,14 @@ fn deobfuscate_proxynova_ip(raw: &str) -> Option<Ipv4Addr> {
         .ok()
 }
 
+/// Visits ProxyNova `{ data: [...] }` rows as HTTP proxies.
+///
+/// Deobfuscates charcode/`atob` IP halves and skips rows with missing ports.
+/// Returning `false` from `visit` stops deserialization early.
+///
+/// # Errors
+///
+/// Returns an error when `body` is not valid ProxyNova JSON.
 pub fn visit_proxynova(
     body: &str,
     mut visit: impl FnMut(ParsedProxy) -> bool,
@@ -490,6 +513,11 @@ fn normalized_text(element: scraper::ElementRef<'_>) -> Cow<'_, str> {
     Cow::Owned(normalized)
 }
 
+/// Visits HTML table rows, locating IP/port columns from headers.
+///
+/// Falls back to the first two columns when headers are unknown and skips
+/// rows with unparseable addresses. Returning `false` from `visit` stops
+/// the scan early.
 pub fn visit_html_table(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool) {
     let document = Html::parse_document(body);
 
@@ -572,6 +600,9 @@ pub fn visit_html_table(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool) 
     }
 }
 
+/// Visits untyped `ip:port` pairs found anywhere in free-form text.
+///
+/// Returning `false` from `visit` stops the scan early.
 pub fn visit_regex_pairs(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool) {
     for row in RE_IP_PORT_PAIR.captures_iter(body).filter_map(|caps| {
         let ip = caps.get(1)?.as_str().parse::<Ipv4Addr>().ok()?;
@@ -584,6 +615,10 @@ pub fn visit_regex_pairs(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool)
     }
 }
 
+/// Visits base64-encoded `Proxy('...')` rows decoded as `ip:port`.
+///
+/// Rows that fail to decode or parse are skipped. Returning `false` from
+/// `visit` stops the scan early.
 pub fn visit_base64_rows(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool) {
     for row in RE_PROXY_CALL.captures_iter(body).filter_map(|caps| {
         let encoded = caps.get(1)?.as_str();
@@ -604,6 +639,14 @@ pub fn visit_base64_rows(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool)
     }
 }
 
+/// Visits untyped proxies from a JSON array of `ip:port` strings.
+///
+/// Unparseable strings are skipped; returning `false` from `visit` stops
+/// deserialization early.
+///
+/// # Errors
+///
+/// Returns an error when `body` is not a JSON array of strings.
 pub fn visit_json_strings(
     body: &str,
     mut visit: impl FnMut(ParsedProxy) -> bool,
@@ -651,6 +694,9 @@ pub fn visit_json_strings(
     }
 }
 
+/// Visits untyped `"ip"`/`"port"` pairs in GatherProxy script payloads.
+///
+/// Returning `false` from `visit` stops the scan early.
 pub fn visit_gatherproxy(body: &str, mut visit: impl FnMut(ParsedProxy) -> bool) {
     for row in RE_GATHERPROXY_ROW.captures_iter(body).filter_map(|caps| {
         let ip = caps.get(1)?.as_str().parse::<Ipv4Addr>().ok()?;

@@ -42,8 +42,11 @@ fn download_lock() -> &'static tokio::sync::Mutex<()> {
 /// Track in-flight GeoLite2 download progress.
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadProgress {
+    /// Database file being downloaded (`GeoLite2-City.mmdb` or ASN).
     pub name: &'static str,
+    /// Bytes written so far.
     pub downloaded: usize,
+    /// Total bytes from `Content-Length`, or 0 when unknown.
     pub total: usize,
 }
 
@@ -235,6 +238,14 @@ where
     result
 }
 
+/// Returns the `<data_dir>/flx` directory, creating it when missing.
+///
+/// Falls back to `./flx` under the current directory when no platform data
+/// directory exists.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be determined or created.
 pub fn data_dir() -> anyhow::Result<PathBuf> {
     if let Some(base) = crate::base_dirs::data_dir() {
         let mut dir = base;
@@ -448,9 +459,12 @@ fn database_name(url: &str) -> &'static str {
     }
 }
 
+/// Outcome of syncing the local GeoLite2 databases with the mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncOutcome {
+    /// Local databases already match the mirror revision.
     UpToDate,
+    /// At least one database was downloaded and installed.
     Synced,
 }
 
@@ -536,6 +550,7 @@ async fn ensure_database(
     }
 }
 
+/// Offline GeoIP lookup backed by cached GeoLite2 City and ASN databases.
 pub struct GeoLookup {
     reader: Reader<Vec<u8>>,
     asn_reader: Reader<Vec<u8>>,

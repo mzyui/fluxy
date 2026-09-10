@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes the Geonode API proxy list.
 pub struct GeonodeProvider;
 
 const PAGES: u32 = 3;

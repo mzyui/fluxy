@@ -17,15 +17,27 @@ use tokio::{net::TcpListener, time};
 
 pub use pool::RotatorPool;
 
+/// Default loopback bind address for the rotating endpoint.
+///
+/// Only available with the `serve` Cargo feature.
 pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+/// Default port for the rotating endpoint.
+///
+/// Only available with the `serve` Cargo feature.
 pub const DEFAULT_PORT: u16 = 8080;
 /// Cap pooled proxies; feeder refills up to it.
 pub const MAX_POOL_SIZE: usize = 25;
 /// Bound queued serve events; excess events drop instead of blocking relays.
 pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// Default pool capacity, equal to [`MAX_POOL_SIZE`].
+///
+/// Only available with the `serve` Cargo feature.
 pub const DEFAULT_POOL_SIZE: usize = MAX_POOL_SIZE;
 /// Gate serving until this many proxies are ready.
 pub const DEFAULT_MIN_READY: usize = 1;
+/// Default pool refill interval in seconds.
+///
+/// Only available with the `serve` Cargo feature.
 pub const DEFAULT_REFRESH_SECS: u64 = 300;
 /// Bound each connection end-to-end without per-phase splits.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,13 +48,21 @@ const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Upstream rotation strategy.
+///
+/// Only available with the `serve` Cargo feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
+    /// Cycle upstreams in insertion order.
     RoundRobin,
+    /// Pick a random start offset per connection.
     Random,
 }
 
 impl Strategy {
+    /// Parses `round-robin` or `random`, or `None` for anything else.
+    ///
+    /// Only available with the `serve` Cargo feature.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "round-robin" => Some(Self::RoundRobin),
@@ -51,6 +71,9 @@ impl Strategy {
         }
     }
 
+    /// Returns the CLI spelling (`round-robin` or `random`).
+    ///
+    /// Only available with the `serve` Cargo feature.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::RoundRobin => "round-robin",
@@ -59,16 +82,26 @@ impl Strategy {
     }
 }
 
+/// Options for the rotating proxy endpoint.
+///
+/// Only available with the `serve` Cargo feature.
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
+    /// Address to bind the local endpoint to.
     pub bind: IpAddr,
+    /// Port to bind the local endpoint to.
     pub port: u16,
+    /// Upstream rotation strategy.
     pub strategy: Strategy,
+    /// Maximum pooled proxies; capped at [`MAX_POOL_SIZE`].
     pub pool_size: usize,
+    /// Proxies required before serving connections.
     pub min_ready: usize,
+    /// Pool refill interval in seconds.
     pub refresh_secs: u64,
     /// Require Basic proxy auth from clients.
     pub auth: Option<(String, String)>,
+    /// End-to-end budget per connection.
     pub request_timeout: Duration,
     /// Opt-in sink for per-connection events; `None` disables reporting.
     pub event_tx: Option<mpsc::Sender<ServeEvent>>,
@@ -124,24 +157,41 @@ fn fmt_bytes(bytes: u64) -> String {
 pub enum ServeEvent {
     /// A parseable request head arrived from a client.
     Incoming {
+        /// Connection sequence number.
         id: u64,
+        /// Client socket address, if known.
         client: Option<SocketAddr>,
+        /// Request method (e.g. `GET`, `CONNECT`).
         method: String,
+        /// Request target authority (`host:port`).
         target: String,
     },
     /// The connection reached an upstream outcome.
     Completed {
+        /// Connection sequence number.
         id: u64,
+        /// Client socket address, if known.
         client: Option<SocketAddr>,
+        /// Request method (e.g. `GET`, `CONNECT`).
         method: String,
+        /// Request target authority (`host:port`).
         target: String,
+        /// Upstream proxy that served it, if any.
         upstream: Option<String>,
+        /// Whether the exchange succeeded.
         ok: bool,
+        /// Failure reason when `ok` is false.
         reason: Option<String>,
+        /// Time from accept to completion.
         elapsed: Duration,
     },
     /// One curl-like trace line for an in-flight connection.
-    Trace { id: u64, text: String },
+    Trace {
+        /// Connection sequence number.
+        id: u64,
+        /// Rendered trace line.
+        text: String,
+    },
 }
 
 impl std::fmt::Display for ServeEvent {

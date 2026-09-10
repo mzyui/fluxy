@@ -300,6 +300,7 @@ async fn my_ip_via_https() -> anyhow::Result<String> {
 
 static MY_IP_CACHE: OnceCell<String> = OnceCell::const_new();
 
+/// Returns the cached public IP when [`my_ip`] already resolved it.
 pub fn cached_my_ip() -> Option<String> {
     MY_IP_CACHE.get().cloned()
 }

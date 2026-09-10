@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes freeproxy.world paged listings.
 pub struct FreeProxyWorldProvider;
 
 const MAX_PAGES: u32 = 15;

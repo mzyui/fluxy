@@ -72,6 +72,9 @@ pub(crate) fn tls_connector(insecure: bool) -> TlsConnector {
     TLS_CONNECTORS[insecure as usize].clone()
 }
 
+/// Builds an HTTPS connector with the shared strict TLS config.
+///
+/// Used for provider fetches and plain judge requests.
 pub fn https_connector() -> HttpsConnector {
     https_connector_with_config(
         hyper_util::client::legacy::connect::HttpConnector::new(),
@@ -182,6 +185,9 @@ where
     ConnectionDriver { handle }
 }
 
+/// Background task pumping an HTTP/1 connection until the linger expires.
+///
+/// Dropping it aborts the task; keep it alive while the response is in use.
 #[derive(Debug)]
 pub struct ConnectionDriver {
     handle: tokio::task::JoinHandle<()>,
@@ -193,14 +199,19 @@ impl Drop for ConnectionDriver {
     }
 }
 
+/// Response wrapper carrying timing stats and its connection driver.
 #[derive(Debug)]
 pub struct ProxyRuntimes<T> {
+    /// Wrapped value, usually a socket or HTTP response.
     pub inner: T,
+    /// Timing samples collected while producing the value.
     pub runtimes: RuntimeStats,
+    /// Connection task kept alive while the value is in use; `None` for plain TCP connects.
     pub driver: Option<ConnectionDriver>,
 }
 
 impl<T> ProxyRuntimes<T> {
+    /// Records the average runtime onto the proxy when a sample exists.
     pub fn apply(&self, proxy: &mut Proxy) {
         // Fold single end-to-end sample into proxy stats.
         let avg = self.runtimes.avg();
@@ -210,14 +221,22 @@ impl<T> ProxyRuntimes<T> {
     }
 }
 
+/// Sends HTTP requests directly or through a proxy endpoint.
 #[async_trait]
 pub trait ProxyClient {
+    /// Returns the `host:port` endpoint label used for dialing and logs.
     fn host(&self) -> Cow<'_, str>;
 
+    /// Returns the endpoint label as shared text for background tasks.
     fn host_arc(&self) -> Arc<str> {
         Arc::from(self.host().as_ref())
     }
 
+    /// Opens a TCP connection within the timeout with `set_nodelay` enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connect times out or is refused.
     async fn connect_timeout(
         &mut self,
         timeout: Duration,
@@ -242,6 +261,14 @@ pub trait ProxyClient {
         })
     }
 
+    /// Connects, runs the proxy handshake, then sends the request.
+    ///
+    /// The whole flow must finish within `timeout`; `negotiator` is `None`
+    /// for direct connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when connecting, negotiating, or sending times out or fails.
     async fn send_request<B, N>(
         &mut self,
         req: Request<B>,
@@ -315,6 +342,13 @@ pub trait ProxyClient {
         }
     }
 
+    /// Sends the request over an established socket, upgrading to TLS when asked.
+    ///
+    /// The returned driver must be kept alive while reading the response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the TLS handshake or the HTTP/1 exchange fails.
     async fn send_via_conn<B>(
         &mut self,
         req: Request<B>,
@@ -381,6 +415,7 @@ pub trait ProxyClient {
         })
     }
 
+    /// Emits a trace line prefixed with the endpoint when the `log` feature is enabled.
     fn log_trace<S>(&self, _msg: S)
     where
         S: Display,
@@ -389,6 +424,7 @@ pub trait ProxyClient {
         log::trace!("{}: {}", self.host(), _msg);
     }
 
+    /// Emits version, status, and content length at trace level.
     fn log_response_head(&self, response: &Response<Incoming>) {
         let content_length = response
             .headers()
@@ -403,6 +439,7 @@ pub trait ProxyClient {
         ));
     }
 
+    /// Emits an error line prefixed with the endpoint at trace level.
     fn log_error<S>(&self, _msg: S)
     where
         S: Display,
@@ -414,9 +451,12 @@ pub trait ProxyClient {
     }
 }
 
+/// Per-request transport switches for [`ProxyClient::send_via_conn`].
 #[derive(Clone, Copy)]
 pub struct SendOptions {
+    /// Wraps the socket in TLS before the HTTP/1 handshake.
     tls: bool,
+    /// Skips TLS certificate verification.
     insecure: bool,
 }
 

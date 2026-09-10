@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes my-proxy.com free proxy lists.
 pub struct MyProxyProvider;
 
 #[async_trait]

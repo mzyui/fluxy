@@ -9,6 +9,7 @@ use tokio::{
 
 use super::NegotiatorTrait;
 
+/// Negotiates HTTP CONNECT tunnels for HTTPS proxies.
 pub struct HttpsNegotiator;
 
 impl HttpsNegotiator {

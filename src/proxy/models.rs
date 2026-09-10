@@ -1,3 +1,9 @@
+//! Validated proxy endpoint models.
+//!
+//! [`Proxy`](crate::Proxy) is the unit passed through fetch → validate → filter.
+//! [`Protocol`](crate::Protocol) selects the validation path, [`Anonymity`](crate::Anonymity) ranks HTTP(S)
+//! privacy, and [`RuntimeStats`](crate::RuntimeStats) tracks response-time samples.
+
 use std::{
     fmt::Display,
     net::Ipv4Addr,
@@ -10,17 +16,41 @@ use serde::Serialize;
 
 use crate::{error::ProtocolParseError, error::ProxyParseError, geolookup::models::GeoData};
 
-/// Track running response-time statistics.
+/// Running response-time statistics for one proxy.
+///
+/// # Examples
+///
+/// ```
+/// use flx::proxy::models::RuntimeStats;
+///
+/// let mut stats = RuntimeStats::default();
+/// stats.record(0.5);
+/// assert_eq!(stats.avg(), 0.5);
+/// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RuntimeStats {
+    /// Number of recorded samples.
     pub count: u32,
+    /// Sum of all samples, in seconds.
     pub total: f64,
+    /// Fastest sample, in seconds.
     pub min: f64,
+    /// Slowest sample, in seconds.
     pub max: f64,
 }
 
 impl RuntimeStats {
-    /// Record timing sample.
+    /// Records one timing sample, in seconds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flx::proxy::models::RuntimeStats;
+    ///
+    /// let mut stats = RuntimeStats::default();
+    /// stats.record(0.2);
+    /// assert_eq!(stats.count, 1);
+    /// ```
     pub fn record(&mut self, secs: f64) {
         self.count += 1;
         self.total += secs;
@@ -32,6 +62,15 @@ impl RuntimeStats {
         }
     }
 
+    /// Returns the mean sample, or `0.0` when unsampled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flx::proxy::models::RuntimeStats;
+    ///
+    /// assert_eq!(RuntimeStats::default().avg(), 0.0);
+    /// ```
     pub fn avg(&self) -> f64 {
         if self.count == 0 {
             0.0
@@ -41,16 +80,43 @@ impl RuntimeStats {
     }
 }
 
+/// HTTP(S) anonymity level, ordered by [`Anonymity::rank`].
+///
+/// Unknown levels match any requested level on the same family.
+///
+/// # Examples
+///
+/// ```
+/// use flx::{Anonymity, Protocol};
+///
+/// let elite = Protocol::Http(Anonymity::Elite);
+/// assert!(matches!(elite, Protocol::Http(Anonymity::Elite)));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Anonymity {
+    /// Server sees neither client IP nor proxy usage.
     Elite,
+    /// Server sees the request came via a proxy.
     Transparent,
+    /// Server sees a proxy was used but not the client IP.
     Anonymous,
+    /// Anonymity was not advertised or not yet probed.
     Unknown,
 }
 
 impl Anonymity {
-    /// Rank anonymity from least to most anonymous.
+    /// Ranks anonymity from least to most anonymous.
+    ///
+    /// Transparent (0) < Anonymous (1) < Elite (2); Unknown (3) sorts last
+    /// so unclassified candidates are not silently preferred.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flx::Anonymity;
+    ///
+    /// assert!(Anonymity::Elite.rank() > Anonymity::Transparent.rank());
+    /// ```
     pub fn rank(self) -> u8 {
         match self {
             Anonymity::Transparent => 0,
@@ -61,12 +127,30 @@ impl Anonymity {
     }
 }
 
+/// Proxy protocol under test; selects the validation path.
+///
+/// `+` groups in type syntax (e.g. `HTTP+HTTPS`) combine variants; `:`
+/// suffixes pin [`Anonymity`] (e.g. `HTTP:Elite`).
+///
+/// # Examples
+///
+/// ```
+/// use flx::Protocol;
+///
+/// let protocol: Protocol = "SOCKS5".parse().unwrap();
+/// assert_eq!(protocol, Protocol::Socks5);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
+    /// Plain HTTP proxy with an anonymity level.
     Http(Anonymity),
+    /// HTTP CONNECT tunnel with an anonymity level.
     Https(Anonymity),
+    /// SOCKS4 proxy.
     Socks4,
+    /// SOCKS5 proxy.
     Socks5,
+    /// Raw CONNECT tunnel to `port`.
     Connect(u16),
 }
 
@@ -165,15 +249,29 @@ impl FromStr for Protocol {
     }
 }
 
+/// One validated protocol on a [`Proxy`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyType {
+    /// Protocol that passed validation.
     pub protocol: Protocol,
+    /// Whether this protocol was checked.
     #[serde(skip)]
     pub checked: bool,
+    /// Unix timestamp of the check, in seconds.
     pub checked_on: f64,
 }
 
 impl ProxyType {
+    /// Creates an unchecked protocol entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flx::{Protocol, ProxyType};
+    ///
+    /// let entry = ProxyType::new(Protocol::Socks5);
+    /// assert!(!entry.checked);
+    /// ```
     pub fn new(protocol: Protocol) -> Self {
         Self {
             protocol,
@@ -194,14 +292,32 @@ impl ProxyType {
     }
 }
 
-/// Represent validated proxy endpoint with metadata.
+/// Validated proxy endpoint with geo and timing metadata.
+///
+/// Parse from `ip:port` or scheme-prefixed text; bare lines leave
+/// `expected_types` empty until the caller assigns defaults.
+///
+/// # Examples
+///
+/// ```
+/// use flx::Proxy;
+///
+/// let proxy: Proxy = "1.2.3.4:8080".parse().unwrap();
+/// assert_eq!(proxy.as_text(), "1.2.3.4:8080");
+/// ```
 #[derive(Debug, Clone)]
 pub struct Proxy {
+    /// Proxy IPv4 address.
     pub ip: Ipv4Addr,
+    /// Proxy TCP port.
     pub port: u16,
+    /// GeoIP record; empty when lookup is disabled.
     pub geo: Arc<GeoData>,
+    /// Response-time samples across validations.
     pub runtimes: RuntimeStats,
+    /// Protocols to probe; empty means "assign caller defaults".
     pub expected_types: Arc<[Protocol]>,
+    /// Protocols that passed validation.
     pub proxy_types: Vec<ProxyType>,
     pub(crate) text: Arc<str>,
 }
@@ -229,6 +345,16 @@ impl serde::Serialize for Proxy {
 static DEFAULT_GEO: LazyLock<Arc<GeoData>> = LazyLock::new(|| Arc::new(GeoData::default()));
 
 impl Proxy {
+    /// Creates an endpoint with empty geo, timings, and type sets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flx::Proxy;
+    ///
+    /// let proxy = Proxy::new("1.2.3.4".parse().unwrap(), 8080);
+    /// assert_eq!(proxy.as_text(), "1.2.3.4:8080");
+    /// ```
     pub fn new(ip: Ipv4Addr, port: u16) -> Self {
         let mut buf = [0u8; 32];
         let text = crate::write_to_buffer(&mut buf, format_args!("{ip}:{port}"));
@@ -243,6 +369,21 @@ impl Proxy {
         }
     }
 
+    /// Attaches the protocols to probe for this endpoint.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use flx::{Protocol, Proxy};
+    ///
+    /// let proxy = Proxy::with_expected_types(
+    ///     "1.2.3.4".parse().unwrap(),
+    ///     8080,
+    ///     Arc::from([Protocol::Socks5]),
+    /// );
+    /// assert_eq!(proxy.expected_types.as_ref(), &[Protocol::Socks5]);
+    /// ```
     pub fn with_expected_types(ip: Ipv4Addr, port: u16, expected_types: Arc<[Protocol]>) -> Self {
         let mut proxy = Self::new(ip, port);
         proxy.expected_types = expected_types;
@@ -288,6 +429,16 @@ impl Default for Proxy {
 }
 
 impl Proxy {
+    /// Returns the mean response time, or `0.0` when unsampled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flx::Proxy;
+    ///
+    /// let proxy: Proxy = "1.2.3.4:8080".parse().unwrap();
+    /// assert_eq!(proxy.avg_response_time(), 0.0);
+    /// ```
     pub fn avg_response_time(&self) -> f64 {
         self.runtimes.avg()
     }

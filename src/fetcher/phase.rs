@@ -20,11 +20,17 @@ use crate::{
     proxy::models::Proxy,
 };
 
-/// Report fetch-phase transitions to consumers.
+/// Fetch-phase transitions reported to consumers.
+///
+/// Primary providers run first; fallback mirrors replay only what primary
+/// missed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchStage {
+    /// Primary provider set is being scraped.
     Primary,
+    /// Fallback mirrors are being scraped.
     Fallback,
+    /// All fetch phases finished.
     Done,
 }
 

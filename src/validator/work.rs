@@ -25,11 +25,18 @@ pub(crate) struct WorkParams {
 }
 
 /// Record proxy failing validation in machine-readable form.
+///
+/// Emitted on the failure channel when [`Config::report_failures`](crate::validator::Config::report_failures)
+/// is enabled; the `reason` is `"unsatisfied"`, `"group-dead"`, or a classified error string.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyFailure {
+    /// IPv4 address of the failed candidate.
     pub ip: std::net::Ipv4Addr,
+    /// Port of the failed candidate.
     pub port: u16,
+    /// Protocol that was probed when the failure occurred.
     pub protocol: Protocol,
+    /// Machine-readable failure cause (e.g. `"timeout"`, `"rejected"`, `"unsatisfied"`).
     pub reason: String,
 }
 

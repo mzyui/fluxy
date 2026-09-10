@@ -18,9 +18,20 @@ pub enum SortKey {
 }
 
 /// Selects the direction a buffered sort applies.
+///
+/// # Examples
+///
+/// ```
+/// use flx::{Proxy, SortKey, SortOrder, sort_proxies};
+///
+/// let mut proxies: Vec<Proxy> = vec![];
+/// sort_proxies(&mut proxies, SortKey::Anonymity, SortOrder::Asc);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortOrder {
+    /// Smallest / fastest / best rank first.
     Asc,
+    /// Largest / slowest first.
     Desc,
 }
 

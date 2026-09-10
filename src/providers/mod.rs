@@ -1,3 +1,8 @@
+//! Built-in proxy list providers and the [`ProxyProvider`] contract.
+//!
+//! Each provider exposes [`Source`] URLs plus a scrape mode;
+//! the fetcher downloads them and parses bodies with [`parsers`] visitors.
+
 use std::{
     borrow::Cow,
     collections::{HashSet, VecDeque},
@@ -26,9 +31,11 @@ mod geonode;
 mod github;
 mod hide_my_name;
 mod hproxy;
+/// Scrape contexts, modes, tiers, and source descriptors.
 pub mod models;
 mod my_proxy;
 mod openproxylist;
+/// Streaming body parsers shared by all providers.
 pub mod parsers;
 mod proxy_db;
 mod proxylist_org;
@@ -36,22 +43,37 @@ mod proxynova;
 mod proxyscrape;
 mod spys_one;
 
+/// Provider scraping `free-proxy-list.net` HTML tables.
 pub use free_proxy_list::FreeProxyListProvider;
+/// Provider scraping `freeproxy.world` page lists.
 pub use freeproxy_world::FreeProxyWorldProvider;
+/// Provider scraping the Geonode JSON API.
 pub use geonode::GeonodeProvider;
+/// Provider scraping raw proxy files from GitHub repositories.
 pub use github::GithubRepoProvider;
+/// Provider scraping `hidemy.name` HTML tables.
 pub use hide_my_name::HideMyNameProvider;
+/// Provider scraping the HProxy listing.
 pub use hproxy::HProxyProvider;
+/// Provider scraping the MyProxy listing.
 pub use my_proxy::MyProxyProvider;
+/// Provider scraping OpenProxyList plaintext feeds.
 pub use openproxylist::OpenProxyListProvider;
+/// Provider scraping `proxydb.net` HTML tables.
 pub use proxy_db::ProxyDbProvider;
+/// Provider scraping `proxy-list.org` tables.
 pub use proxylist_org::ProxyListOrgProvider;
+/// Provider scraping the ProxyNova JSON API.
 pub use proxynova::ProxyNovaProvider;
+/// Provider scraping ProxyScrape feeds.
 pub use proxyscrape::ProxyscrapeProvider;
+/// Provider scraping `spys.one` listings.
 pub use spys_one::SpysOneProvider;
 
+/// Scheduling tier used to order provider fetches.
 pub use models::ProviderTier;
 
+/// Returns one instance of every built-in provider in fetch order.
 pub fn all_providers() -> Vec<std::sync::Arc<dyn ProxyProvider + Send + Sync>> {
     vec![
         std::sync::Arc::new(ProxyscrapeProvider),
@@ -87,9 +109,17 @@ pub fn select_providers(
 }
 
 /// Scrape a single user-supplied plaintext URL.
-pub struct CustomUrlProvider(pub Source);
+pub struct CustomUrlProvider(
+    /// The user-supplied source scraped as plaintext.
+    pub Source,
+);
 
 impl CustomUrlProvider {
+    /// Wraps `url` as an untyped plaintext source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `url` is not a valid provider URL.
     pub fn new(url: &str) -> anyhow::Result<Self> {
         Ok(Self(Source::all(url)?))
     }
@@ -106,16 +136,35 @@ impl ProxyProvider for CustomUrlProvider {
     }
 }
 
+/// Contract every proxy list provider must implement.
+///
+/// The default [`fetch`](ProxyProvider::fetch) downloads a source body and the
+/// default [`scrape_with`](ProxyProvider::scrape_with) parses it, so most
+/// providers only define [`name`](ProxyProvider::name) and
+/// [`sources`](ProxyProvider::sources).
 #[async_trait]
 pub trait ProxyProvider {
+    /// Stable provider name used for include/exclude filters.
     fn name(&self) -> &'static str;
 
+    /// Scheduling tier; primary providers run before fallback ones.
     fn tier(&self) -> ProviderTier {
         ProviderTier::Primary
     }
 
+    /// Source URLs scraped for this provider with their modes and timeouts.
     fn sources(&self) -> Vec<Source>;
 
+    /// Downloads `url` as UTF-8 text, following redirects within `timeout`.
+    ///
+    /// Returns the full body; rejects non-success statuses, oversized bodies,
+    /// and non-UTF-8 content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL is invalid, the request or body stream
+    /// fails or times out, redirects loop or exceed the limit, the status is
+    /// not success, the body exceeds the size cap, or it is not valid UTF-8.
     async fn fetch(
         &self,
         client: Arc<Client<crate::proxy::client::HttpsConnector, Empty<Bytes>>>,
@@ -205,6 +254,13 @@ pub trait ProxyProvider {
         Ok(Cow::Owned(content))
     }
 
+    /// Parses `html` as plaintext and forwards proxies to `tx`.
+    ///
+    /// Stops early without error when the receiver is closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parser task fails.
     async fn scrape(
         &self,
         html: Cow<'static, str>,
@@ -222,6 +278,16 @@ pub trait ProxyProvider {
         .await
     }
 
+    /// Parses `body` with `ctx.mode` and forwards proxies to `tx`.
+    ///
+    /// Rows advertising a protocol keep it, others inherit
+    /// `ctx.default_types`; stops early without error when the receiver
+    /// is closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the body is malformed JSON for the selected
+    /// mode or the parser task fails.
     async fn scrape_with(
         &self,
         body: Cow<'static, str>,

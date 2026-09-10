@@ -6,6 +6,7 @@ use super::models::{valid_sources, ProviderTier, Source};
 use super::ProxyProvider;
 use crate::proxy::models::{Anonymity, Protocol};
 
+/// Scrapes GitHub raw mirrors of proxy lists.
 pub struct GithubRepoProvider;
 
 static SOURCES: [(&str, Protocol); 31] = [

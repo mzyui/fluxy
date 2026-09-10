@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use super::models::{valid_sources, ScrapeMode, Source};
 use super::ProxyProvider;
 
+/// Scrapes spys.one free proxy lists.
 pub struct SpysOneProvider;
 
 #[async_trait]

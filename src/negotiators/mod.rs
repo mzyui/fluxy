@@ -18,6 +18,14 @@ use tokio::net::TcpStream;
 /// Negotiate handshake for a proxy protocol.
 #[async_trait]
 pub trait NegotiatorTrait {
+    /// Runs the protocol handshake over the connected socket.
+    ///
+    /// The default impl is a no-op for direct connections; overrides speak
+    /// the proxy protocol before the request is sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the handshake fails.
     async fn negotiate(
         &self,
         _stream: &mut TcpStream,

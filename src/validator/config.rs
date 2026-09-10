@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::Protocol;
 
+/// Default plain-HTTP online judges used when [`Config::http_judge_urls`] is untouched.
 pub const DEFAULT_HTTP_JUDGE_URLS: &[&str] = &[
     "http://azenv.net/",
     "http://wfuchs.de/azenv.php",
@@ -10,6 +11,7 @@ pub const DEFAULT_HTTP_JUDGE_URLS: &[&str] = &[
     "http://shinh.org/env.cgi",
 ];
 
+/// Default TLS judges used for tunnel checks when [`Config::https_judge_urls`] is untouched.
 pub const DEFAULT_HTTPS_JUDGE_URLS: &[&str] = &[
     "https://aranguren.org/azenv.php",
     "https://wfuchs.de/azenv.php",
@@ -21,14 +23,26 @@ pub const DEFAULT_HTTPS_JUDGE_URLS: &[&str] = &[
 /// family quotas are all filled return false so workers skip those probes.
 pub type ProbeGate = Arc<dyn Fn(Protocol) -> bool + Send + Sync>;
 
+/// Validation inputs for [`ProxyValidator::validate`](crate::validator::ProxyValidator::validate).
+///
+/// At least one of `types` or `groups` must be non-empty; [`Config::default`]
+/// fills public judge pools, a single attempt, and no failure reporting.
 pub struct Config {
+    /// Maximum concurrent validation probes (must be greater than zero).
     pub concurrency_limit: usize,
+    /// Per-probe timeout in seconds (must be greater than zero).
     pub request_timeout: u64,
+    /// Requested protocols; each matching advertised type spawns one probe job.
     pub types: Vec<Protocol>,
+    /// AND-groups; a proxy passes only when every slot of a group passes.
     pub groups: Vec<Vec<Protocol>>,
+    /// Probe attempts per candidate before giving up (must be greater than zero).
     pub max_attempts: usize,
+    /// Plain-HTTP judge URLs used for `HTTP` probes.
     pub http_judge_urls: Vec<String>,
+    /// Judge URLs used for tunnel probes (`HTTPS`, `SOCKS4`, `SOCKS5`, `CONNECT`).
     pub https_judge_urls: Vec<String>,
+    /// Accept invalid TLS certificates on judge connections.
     pub insecure: bool,
     /// Probe requested types missing from advertised set.
     pub probe_missed_types: bool,
@@ -37,13 +51,16 @@ pub struct Config {
     /// Require judge to echo request referer header.
     pub support_referer: bool,
     /// Delay retries of the same proxy.
+    /// Slept between attempts of one probe; zero disables the delay.
     pub retry_delay: Duration,
     /// Emit machine-readable report for every failed probe.
+    /// Consume via `take_failures` before draining the stream.
     pub report_failures: bool,
     /// Skip probes for requested protocols the gate closes (`None` probes all).
     pub probe_gate: Option<ProbeGate>,
 }
 
+/// Default worker count used by [`Config::default`].
 pub const DEFAULT_CONCURRENCY_LIMIT: usize = 500;
 
 impl Default for Config {
